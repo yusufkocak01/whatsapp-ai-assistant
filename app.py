@@ -4,85 +4,122 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 import os
+import re
 
 app = Flask(__name__)
 
-# Google Sheets'e erişim
+# Google Sheets erişimi
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
 CLIENT = gspread.authorize(CREDS)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit"
 
-def get_data_from_sheet(tab_name):
-    try:
-        sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab_name)
-        records = sheet.get_all_records()
-        # Sadece "açıklama" sütunlarını al, her satırı bir satırda topla
-        descriptions = [str(r.get("açıklama", "")).strip() for r in records if r.get("açıklama")]
-        return "\n".join(descriptions) if descriptions else "Bu hizmetle ilgili bilgi mevcut değil."
-    except Exception as e:
-        return "Bu hizmetle ilgili bilgi mevcut değil."
+# Tüm sekme isimleri
+TABS = ["stres_evi", "davet_evi", "sahibinden", "proje", "seslendirme", "metin", "mentor"]
+
+def find_best_match(user_query, sheet_records):
+    """Kullanıcının sorduğuyla en uygun 'ad' sütununu bulur."""
+    user_query = user_query.lower().strip()
+    best_match = None
+    best_score = 0
+
+    for row in sheet_records:
+        keyword = str(row.get("ad", "")).lower()
+        if not keyword:
+            continue
+        # Basit eşleşme: kelime içeriyorsa
+        if keyword in user_query or user_query in keyword:
+            score = len(set(user_query.split()) & set(keyword.split()))
+            if score > best_score:
+                best_score = score
+                best_match = row
+    return best_match
+
+def get_all_tab_keywords():
+    """Tüm sekmelerdeki 'ad' sütunlarını listeler (yardımcı öneri için)."""
+    keywords = {}
+    for tab in TABS:
+        try:
+            sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab)
+            records = sheet.get_all_records()
+            kw_list = [str(r.get("ad", "")) for r in records if r.get("ad")]
+            if kw_list:
+                keywords[tab] = kw_list
+        except:
+            continue
+    return keywords
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
-    incoming_msg = request.values.get('Body', '').strip().lower()
+    incoming_msg = request.values.get('Body', '').strip()
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Basit anahtar kelimeye göre sekme seçimi
-    if "stres" in incoming_msg:
-        tab = "stres_evi"
-    elif "davet" in incoming_msg:
-        tab = "davet_evi"
-    elif "şarkı" in incoming_msg or "ses" in incoming_msg:
-        tab = "seslendirme"
-    elif "proje" in incoming_msg:
-        tab = "proje"
-    elif "metin" in incoming_msg:
-        tab = "metin"
-    elif "mentor" in incoming_msg:
-        tab = "mentor"
-    elif "sahibinden" in incoming_msg:
-        tab = "sahibinden"
-    else:
-        tab = "stres_evi"  # Varsayılan
+    # 1. Önce tüm sekmelerde doğrudan eşleşme ara
+    matched_row = None
+    matched_tab = None
 
-    sheet_data = get_data_from_sheet(tab)
+    for tab in TABS:
+        try:
+            sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab)
+            records = sheet.get_all_records()
+            match = find_best_match(incoming_msg, records)
+            if match:
+                matched_row = match
+                matched_tab = tab
+                break
+        except:
+            continue
 
-    # OpenRouter API çağrısı — açıklama metnini temel al, ama doğal yanıt üret
-    prompt = f"""
-Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
-Müşteri şu soruyu sordu: "{incoming_msg}"
+    if matched_row:
+        # 2. Eşleşme bulunduysa, o satırdaki tüm verileri kullan
+        context = f"""
+Hizmet: {matched_tab}
+Soru: {matched_row.get('ad', '')}
+Açıklama: {matched_row.get('açıklama', 'Bilgi yok')}
+Fiyat: {matched_row.get('fiyat', 'Belirtilmemiş')}
+Süre: {matched_row.get('süre', 'Belirtilmemiş')}
+Notlar: {matched_row.get('notlar', '')}
+        """.strip()
 
-Aşağıda, ilgili hizmetle ilgili resmi açıklama yer alıyor.  
-Bu açıklamayı mutlaka temel al, ama cevabını kendi doğal dilinle, samimi ve empatik bir şekilde oluştur:
+        prompt = f"""
+Sen Yusuf Koçak'ın dijital asistanısın. Aşağıdaki bilgileri kullanarak müşteriye yardımcı ol.
+SADECE bu bilgileri kullan — dış bilgi ekleme, uydurma, tahmin etme.
 
-"{sheet_data}"
+{context}
 
 Kurallar:
-- Satış yapmaya zorlama
-- Türkçe, günlük konuşma diliyle yaz
-- Müşterinin duygusal ihtiyacını anla ve ona göre ilerle
+- Samimi, günlük Türkçe konuşma diliyle yanıt ver.
+- Kısa ve net ol.
+- Satış yapmaya zorlama; sadece bilgi ver.
+- Eğer açıklama yetersizse, "Detaylı bilgi için lütfen bizimle konuşun." de.
 """
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "mistralai/mistral-7b-instruct:free",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 400
+                }
+            )
+            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", "Şu an yardımcı olamıyorum.")
+        except:
+            reply = matched_row.get("açıklama", "Bilgi alınamadı.")  # Fallback: direkt açıklama
+        msg.body(reply)
 
-    try:
-        openrouter_resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mistral-7b-instruct:free",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 500
-            }
+    else:
+        # 3. Hiçbir eşleşme yoksa: hangi hizmet olduğunu sor
+        msg.body(
+            "Merhaba! Size nasıl yardımcı olabilirim?\n\n"
+            "Hangi hizmetle ilgileniyorsunuz?\n"
+            "• Stres atmak\n• Davet evi\n• Proje yazımı\n• Kişiselleştirilmiş şarkı\n• Metin yazımı\n• Mentorluk\n• Sahibinden danışmanlık"
         )
-        reply = openrouter_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "Şu an yardımcı olamıyorum.")
-    except Exception as e:
-        reply = "Teknik bir hata oluştu. Lütfen daha sonra tekrar deneyin."
 
-    msg.body(reply)
     return str(resp)
 
 if __name__ == '__main__':
