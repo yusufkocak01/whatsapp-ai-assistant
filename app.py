@@ -4,7 +4,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import requests
 import os
-import re
 
 app = Flask(__name__)
 
@@ -14,40 +13,17 @@ CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCO
 CLIENT = gspread.authorize(CREDS)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit"
 
-# Tüm sekme isimleri
+# Hizmet sekmeleri
 TABS = ["stres_evi", "davet_evi", "sahibinden", "proje", "seslendirme", "metin", "mentor"]
 
-def find_best_match(user_query, sheet_records):
-    """Kullanıcının sorduğuyla en uygun 'ad' sütununu bulur."""
-    user_query = user_query.lower().strip()
-    best_match = None
-    best_score = 0
-
+def find_match_in_sheet(sheet_records, query):
+    """Kullanıcı sorgusunu 'ad' sütununda arar (alt/üst harf duyarsız)."""
+    query = query.strip().lower()
     for row in sheet_records:
-        keyword = str(row.get("ad", "")).lower()
-        if not keyword:
-            continue
-        # Basit eşleşme: kelime içeriyorsa
-        if keyword in user_query or user_query in keyword:
-            score = len(set(user_query.split()) & set(keyword.split()))
-            if score > best_score:
-                best_score = score
-                best_match = row
-    return best_match
-
-def get_all_tab_keywords():
-    """Tüm sekmelerdeki 'ad' sütunlarını listeler (yardımcı öneri için)."""
-    keywords = {}
-    for tab in TABS:
-        try:
-            sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab)
-            records = sheet.get_all_records()
-            kw_list = [str(r.get("ad", "")) for r in records if r.get("ad")]
-            if kw_list:
-                keywords[tab] = kw_list
-        except:
-            continue
-    return keywords
+        keyword = str(row.get("ad", "")).strip().lower()
+        if keyword and (keyword in query or query in keyword):
+            return row
+    return None
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
@@ -55,45 +31,53 @@ def whatsapp_webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
-    # 1. Önce tüm sekmelerde doğrudan eşleşme ara
     matched_row = None
     matched_tab = None
 
+    # Tüm sekmelerde eşleşme ara
     for tab in TABS:
         try:
             sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab)
             records = sheet.get_all_records()
-            match = find_best_match(incoming_msg, records)
+            match = find_match_in_sheet(records, incoming_msg)
             if match:
                 matched_row = match
                 matched_tab = tab
                 break
-        except:
-            continue
+        except Exception as e:
+            continue  # Sekme yoksa geç
 
     if matched_row:
-        # 2. Eşleşme bulunduysa, o satırdaki tüm verileri kullan
-        context = f"""
-Hizmet: {matched_tab}
-Soru: {matched_row.get('ad', '')}
-Açıklama: {matched_row.get('açıklama', 'Bilgi yok')}
-Fiyat: {matched_row.get('fiyat', 'Belirtilmemiş')}
-Süre: {matched_row.get('süre', 'Belirtilmemiş')}
-Notlar: {matched_row.get('notlar', '')}
-        """.strip()
+        # Satırdaki tüm bilgileri topla
+        desc = matched_row.get("açıklama", "Bilgi yok")
+        price = matched_row.get("fiyat", "Belirtilmemiş")
+        duration = matched_row.get("süre", "Belirtilmemiş")
+        notes = matched_row.get("notlar", "")
+
+        # Yapay zekaya gönderilecek bağlam
+        context_lines = [f"Açıklama: {desc}"]
+        if price != "Belirtilmemiş" and price != "-":
+            context_lines.append(f"Fiyat: {price}")
+        if duration != "Belirtilmemiş" and duration != "-":
+            context_lines.append(f"Süre: {duration}")
+        if notes:
+            context_lines.append(f"Notlar: {notes}")
+
+        full_context = "\n".join(context_lines)
 
         prompt = f"""
 Sen Yusuf Koçak'ın dijital asistanısın. Aşağıdaki bilgileri kullanarak müşteriye yardımcı ol.
 SADECE bu bilgileri kullan — dış bilgi ekleme, uydurma, tahmin etme.
 
-{context}
+{full_context}
 
 Kurallar:
 - Samimi, günlük Türkçe konuşma diliyle yanıt ver.
-- Kısa ve net ol.
+- Kısa ve net ol (maksimum 2-3 cümle).
 - Satış yapmaya zorlama; sadece bilgi ver.
 - Eğer açıklama yetersizse, "Detaylı bilgi için lütfen bizimle konuşun." de.
 """
+
         try:
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -104,16 +88,16 @@ Kurallar:
                 json={
                     "model": "mistralai/mistral-7b-instruct:free",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 400
+                    "max_tokens": 300
                 }
             )
-            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", "Şu an yardımcı olamıyorum.")
+            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", desc)
         except:
-            reply = matched_row.get("açıklama", "Bilgi alınamadı.")  # Fallback: direkt açıklama
+            reply = desc  # OpenRouter hatasında direkt açıklama kullan
         msg.body(reply)
 
     else:
-        # 3. Hiçbir eşleşme yoksa: hangi hizmet olduğunu sor
+        # Hiçbir eşleşme yoksa yönlendir
         msg.body(
             "Merhaba! Size nasıl yardımcı olabilirim?\n\n"
             "Hangi hizmetle ilgileniyorsunuz?\n"
