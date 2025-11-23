@@ -17,10 +17,11 @@ def get_data_from_sheet(tab_name):
     try:
         sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab_name)
         records = sheet.get_all_records()
-        text = "\n".join([f"- {r['ad']} ({r['fiyat']} TL): {r['açıklama']}" for r in records])
-        return text
-    except:
-        return "Bu kategori için bilgi bulunamadı."
+        # Sadece "açıklama" sütunlarını al, her satırı bir satırda topla
+        descriptions = [str(r.get("açıklama", "")).strip() for r in records if r.get("açıklama")]
+        return "\n".join(descriptions) if descriptions else "Bu hizmetle ilgili bilgi mevcut değil."
+    except Exception as e:
+        return "Bu hizmetle ilgili bilgi mevcut değil."
 
 @app.route('/whatsapp', methods=['POST'])
 def whatsapp_webhook():
@@ -28,7 +29,7 @@ def whatsapp_webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Basit anahtar kelime algılama
+    # Basit anahtar kelimeye göre sekme seçimi
     if "stres" in incoming_msg:
         tab = "stres_evi"
     elif "davet" in incoming_msg:
@@ -48,19 +49,22 @@ def whatsapp_webhook():
 
     sheet_data = get_data_from_sheet(tab)
 
-    # OpenRouter API çağrısı
+    # OpenRouter API çağrısı — açıklama metnini temel al, ama doğal yanıt üret
     prompt = f"""
-Sen Yusuf Koçak'ın dijital asistanısın. Adana merkezli hizmet veriyorsun.
-Müşteri: "{incoming_msg}"
-Hizmet verileri:
-{sheet_data}
+Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
+Müşteri şu soruyu sordu: "{incoming_msg}"
 
-Yanıtla:
-- Samimi, empatik, danışman bir dille
-- "Duygunu Boşalt, Sakin Çık" felsefesini yansıt
+Aşağıda, ilgili hizmetle ilgili resmi açıklama yer alıyor.  
+Bu açıklamayı mutlaka temel al, ama cevabını kendi doğal dilinle, samimi ve empatik bir şekilde oluştur:
+
+"{sheet_data}"
+
+Kurallar:
 - Satış yapmaya zorlama
-- Türkçe ve doğal konuşma diliyle
+- Türkçe, günlük konuşma diliyle yaz
+- Müşterinin duygusal ihtiyacını anla ve ona göre ilerle
 """
+
     try:
         openrouter_resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
