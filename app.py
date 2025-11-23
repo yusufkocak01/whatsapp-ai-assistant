@@ -48,7 +48,7 @@ def whatsapp_webhook():
 
     sheet_data = get_data_from_sheet(tab)
 
-    # Qwen API çağrısı
+    # OpenRouter API çağrısı
     prompt = f"""
 Sen Yusuf Koçak'ın dijital asistanısın. Adana merkezli hizmet veriyorsun.
 Müşteri: "{incoming_msg}"
@@ -61,16 +61,23 @@ Yanıtla:
 - Satış yapmaya zorlama
 - Türkçe ve doğal konuşma diliyle
 """
-    qwen_resp = requests.post(
-        "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-        headers={"Authorization": f"Bearer {os.getenv('QWEN_API_KEY')}"},
-        json={
-            "model": "qwen-turbo",
-            "input": {"messages": [{"role": "user", "content": prompt}]},
-            "parameters": {"max_tokens": 500}
-        }
-    )
-    reply = qwen_resp.json().get("output", {}).get("text", "Şu an yardımcı olamıyorum.")
+    try:
+        openrouter_resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistralai/mistral-7b-instruct:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 500
+            }
+        )
+        reply = openrouter_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "Şu an yardımcı olamıyorum.")
+    except Exception as e:
+        reply = "Teknik bir hata oluştu. Lütfen daha sonra tekrar deneyin."
+
     msg.body(reply)
     return str(resp)
 
