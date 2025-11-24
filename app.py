@@ -7,22 +7,20 @@ import os
 
 app = Flask(__name__)
 
-# Google Sheets erişimi
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
 CLIENT = gspread.authorize(CREDS)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit"
 
-# Tüm sekmeler — sırayla taranacak
+# Tüm sekmeler
 TABS = ["baslangic", "stres_evi", "davet_evi", "sahibinden", "proje", "seslendirme", "metin", "mentor"]
 
 def find_match_in_sheet(sheet_records, query):
-    """Kullanıcı sorgusunu 'anahtar kelime' sütununda arar (case-insensitive)."""
     query = query.strip().lower()
     for row in sheet_records:
-        keyword = str(row.get("anahtar kelime", "")).strip().lower()
+        keyword = str(row.get("ANAHTAR KELİME", "")).strip().lower()
         if keyword and (keyword in query or query in keyword):
-            return row
+            return row.get("AÇIKLAMA (PROMPT)", "Anlaşıldı.")
     return None
 
 @app.route('/whatsapp', methods=['POST'])
@@ -31,85 +29,50 @@ def whatsapp_webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
-    matched_row = None
-    matched_tab = None
+    behavior_prompt = None
 
-    # Önce spesifik sekmelerde (baslangic hariç) ara
-    for tab in TABS[1:]:
+    # Tüm sekmelerde eşleşme ara
+    for tab in TABS:
         try:
             sheet = CLIENT.open_by_url(SHEET_URL).worksheet(tab)
             records = sheet.get_all_records()
-            match = find_match_in_sheet(records, incoming_msg)
-            if match:
-                matched_row = match
-                matched_tab = tab
+            prompt = find_match_in_sheet(records, incoming_msg)
+            if prompt:
+                behavior_prompt = prompt
                 break
         except:
             continue
 
-    # Eğer spesifik sekmede eşleşme yoksa, baslangic sekmesine bak
-    if not matched_row:
-        try:
-            sheet = CLIENT.open_by_url(SHEET_URL).worksheet("baslangic")
-            records = sheet.get_all_records()
-            match = find_match_in_sheet(records, incoming_msg)
-            if match:
-                matched_row = match
-                matched_tab = "baslangic"
-        except:
-            pass
+    if behavior_prompt:
+        full_prompt = f"""
+Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
 
-    if matched_row:
-        # Açıklama zorunlu — diğerleri opsiyonel
-        desc = str(matched_row.get("açıklama", "Bilgi mevcut değil."))
-        price = matched_row.get("fiyat", "Belirtilmemiş")
-        duration = matched_row.get("süre", "Belirtilmemiş")
-        notes = matched_row.get("notlar", "")
+Müşteri şunu yazdı: "{incoming_msg}"
 
-        # Bağlamı oluştur
-        context_parts = [f"Ana bilgi: {desc}"]
-        if price not in ["-", "Belirtilmemiş", ""]:
-            context_parts.append(f"Fiyat: {price}")
-        if duration not in ["-", "Belirtilmemiş", ""]:
-            context_parts.append(f"Süre: {duration}")
-        if notes and notes != "-":
-            context_parts.append(f"Ek not: {notes}")
-
-        full_context = "\n".join(context_parts)
-
-        # Yapay zekaya sadece bu bilgileri kullanmasını söyle
-        prompt = f"""
-Sen Yusuf Koçak'ın dijital asistanısın. Aşağıdaki bilgileri kullanarak müşteriye kısa ve net yardımcı ol.
-SADECE aşağıdaki bilgileri kullan — dış bilgi ekleme, uydurma, tahmin etme.
-
-{full_context}
+Davranış talimatın:
+"{behavior_prompt}"
 
 Kurallar:
-- Günlük, samimi Türkçe kullan.
-- 1-2 cümlede yanıt ver.
-- Satış yapma, sadece bilgi ver.
+- Türkçe, samimi, günlük konuşma diliyle yanıt ver.
+- Talimatta belirtilenleri MUTLAKA uygula.
+- Satış yapmaya zorlama.
+- Kısa ve net ol (1-3 cümle).
 """
-
         try:
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-                    "Content-Type": "application/json"
-                },
+                headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}"},
                 json={
                     "model": "mistralai/mistral-7b-instruct:free",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 250
+                    "messages": [{"role": "user", "content": full_prompt}],
+                    "max_tokens": 300
                 }
             )
-            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", desc)
+            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", behavior_prompt[:200])
         except:
-            reply = desc  # OpenRouter hatasında direkt açıklama kullan
+            reply = "Anlaşıldı. Detaylı bilgi için lütfen bizimle konuşun."
         msg.body(reply)
-
     else:
-        # Hiçbir eşleşme yoksa: çok kısa, nötr yanıt
         msg.body("Merhaba! Detaylı bilgi almak için lütfen ne istediğini net şekilde yazabilir misin? 😊")
 
     return str(resp)
