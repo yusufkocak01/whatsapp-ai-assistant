@@ -44,8 +44,8 @@ def whatsapp_webhook():
             continue
 
     if matched_row:
-        keyword = matched_row.get("ANAHTAR KELİME", "").strip()
-        prompt_text = matched_row.get("AÇIKLAMA(PROMPT)", "").strip()
+        keyword = matched_row.get("anahtar kelime", "").strip()
+        prompt_text = matched_row.get("aciklama", "").strip()
         
         # Her iki alan da prompt olarak kullanılır
         combined_instructions = f"Anahtar kelime: {keyword}\nTalimat: {prompt_text}".strip()
@@ -86,3 +86,4 @@ Kurallar:
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
