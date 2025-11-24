@@ -1,7 +1,4 @@
 import os
-import base64
-import json
-import tempfile
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import gspread
@@ -10,28 +7,13 @@ import requests
 
 app = Flask(__name__)
 
-# Google Credentials: base64 ortam değişkeninden oku
-if "GOOGLE_CREDENTIALS_BASE64" in os.environ:
-    raw = os.environ["GOOGLE_CREDENTIALS_BASE64"].strip()
-    lines = raw.splitlines()
-    if lines and lines[0].startswith("-----"):
-        b64_data = "".join(lines[1:-1])
-    else:
-        b64_data = raw
-    creds_json = base64.b64decode(b64_data).decode("utf-8")
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
-        f.write(creds_json)
-        credentials_path = f.name
-else:
-    credentials_path = "credentials.json"
-
-# Google Sheets erişimi
+# Google Sheets bağlantısı (credentials.json doğrudan okunur)
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-CREDS = ServiceAccountCredentials.from_json_keyfile_name(credentials_path, SCOPE)
+CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
 CLIENT = gspread.authorize(CREDS)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit"
 
-# Tüm sekme isimleri
+# Tüm sekmeler
 TABS = ["baslangic", "stres_evi", "davet_evi", "sahibinden", "proje", "seslendirme", "metin", "mentor"]
 
 def find_match_row(sheet_records, query):
@@ -58,26 +40,29 @@ def whatsapp_webhook():
             if row:
                 matched_row = row
                 break
-        except:
+        except Exception:
             continue
 
     if matched_row:
-        keyword = matched_row.get("ANAHTAR KELİME", "")
-        prompt_text = matched_row.get("AÇIKLAMA(PROMPT)", "Anlaşıldı.")
+        keyword = matched_row.get("ANAHTAR KELİME", "").strip()
+        prompt_text = matched_row.get("AÇIKLAMA(PROMPT)", "").strip()
         
+        # Her iki alan da prompt olarak kullanılır
+        combined_instructions = f"Anahtar kelime: {keyword}\nTalimat: {prompt_text}".strip()
+
         full_prompt = f"""
 Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
 Müşteri şunu yazdı: "{incoming_msg}"
 
-Bu sorgu, şu anahtar kelimeye eşleşti: "{keyword}"
-Davranış talimatın:
-"{prompt_text}"
+Aşağıdaki bilgileri dikkate al:
+{combined_instructions}
 
 Kurallar:
-- Türkçe, samimi, günlük konuşma diliyle yanıt ver.
-- Talimatı VE anahtar kelimeyi dikkate alarak cevap oluştur.
+- Eğer talimatta net bir talimat varsa (örneğin "önce kişi sayısını sor"), bunu kesinlikle yerine getir.
+- Aksi takdirde, samimi, günlük Türkçe konuşma diliyle doğal bir yanıt ver.
 - Satış yapmaya zorlama.
 - Yanıt 1-3 cümle arası olsun.
+- Talimattaki şartlar önceliklidir; onlar yerine getirildikten sonra doğal dil serbest bırakılabilir.
 """
         try:
             response = requests.post(
@@ -89,8 +74,8 @@ Kurallar:
                     "max_tokens": 300
                 }
             )
-            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", prompt_text[:150])
-        except:
+            reply = response.json().get("choices", [{}])[0].get("message", {}).get("content", prompt_text[:150] or "Anlaşıldı.")
+        except Exception:
             reply = "Anlaşıldı. Detaylı bilgi için lütfen bizimle konuşun."
         msg.body(reply)
     else:
