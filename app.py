@@ -19,7 +19,7 @@ TABS = ["baslangic", "stres_evi", "davet_evi", "sahibinden", "proje", "seslendir
 def find_match_row(sheet_records, query):
     query = query.strip().lower()
     for row in sheet_records:
-        keyword = str(row.get("ANAHTAR KELİME", "")).strip().lower()
+        keyword = str(row.get("anahtar kelime", "")).strip().lower()
         if keyword and (keyword in query or query in keyword):
             return row
     return None
@@ -48,7 +48,7 @@ def whatsapp_webhook():
         prompt_text = matched_row.get("aciklama", "").strip()
         
         # Her iki alan da prompt olarak kullanılır
-        combined_instructions = f"Anahtar kelime: {keyword}\nTalimat: {prompt_text}".strip()
+        combined_instructions = f"anahtar kelime: {keyword}\nTalimat: {prompt_text}".strip()
 
         full_prompt = f"""
 Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
@@ -86,4 +86,5 @@ Kurallar:
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
