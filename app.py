@@ -7,13 +7,13 @@ import requests
 
 app = Flask(__name__)
 
-# Google Sheets bağlantısı (credentials.json doğrudan okunur)
+# Google Sheets bağlantısı — credentials.json doğrudan okunur
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", SCOPE)
 CLIENT = gspread.authorize(CREDS)
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit"
 
-# Tüm sekmeler
+# Tüm sekme isimleri
 TABS = ["baslangic", "stres_evi", "davet_evi", "sahibinden", "proje", "seslendirme", "metin", "mentor"]
 
 def find_match_row(sheet_records, query):
@@ -47,22 +47,19 @@ def whatsapp_webhook():
         keyword = matched_row.get("anahtar kelime", "").strip()
         prompt_text = matched_row.get("aciklama", "").strip()
         
-        # Her iki alan da prompt olarak kullanılır
-        combined_instructions = f"anahtar kelime: {keyword}\nTalimat: {prompt_text}".strip()
-
         full_prompt = f"""
 Sen Yusuf Koçak'ın dijital asistanısın. Adana'da hizmet veriyorsun.
 Müşteri şunu yazdı: "{incoming_msg}"
 
-Aşağıdaki bilgileri dikkate al:
-{combined_instructions}
+Bu sorgu, şu anahtar kelimeye eşleşti: "{keyword}"
+Davranış talimatın:
+"{prompt_text}"
 
 Kurallar:
 - Eğer talimatta net bir talimat varsa (örneğin "önce kişi sayısını sor"), bunu kesinlikle yerine getir.
 - Aksi takdirde, samimi, günlük Türkçe konuşma diliyle doğal bir yanıt ver.
 - Satış yapmaya zorlama.
 - Yanıt 1-3 cümle arası olsun.
-- Talimattaki şartlar önceliklidir; onlar yerine getirildikten sonra doğal dil serbest bırakılabilir.
 """
         try:
             response = requests.post(
@@ -86,5 +83,3 @@ Kurallar:
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
