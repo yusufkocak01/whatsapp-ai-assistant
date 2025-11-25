@@ -72,8 +72,8 @@ def index():
     return "✅ Tek Sütun Prompt Sistemi Aktif"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))) bak bakalım hata var mı burada gemini api var mı mesela
-@app.route('/debug', methods=['GET'])
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))@app.route('/debug', methods=['GET'])
 def debug():
     # 1. credentials.json var mı?
     creds_ok = os.path.exists("credentials.json")
@@ -95,3 +95,4 @@ def debug():
     🔑 GEMINI_API_KEY: {gemini_key[:8]}...<br>
     📊 Google Sheets: {sheets_ok}
     """
+
