@@ -8,12 +8,12 @@ import tempfile
 
 app = Flask(__name__)
 
-# Ayarlar
+# 🔧 Ayarlar (düzeltildi: fazladan boşluklar kaldırıldı)
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
 SHEET_NAME = "baslangic"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Google Sheets kimlik doğrulama (Railway uyumlu)
+# 🧾 Google Sheets kimlik doğrulama (Railway uyumlu)
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 if not GOOGLE_CREDENTIALS_JSON:
     raise ValueError("GOOGLE_CREDENTIALS_JSON ortam değişkeni eksik!")
@@ -24,6 +24,7 @@ with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tf:
     json.dump(creds_dict, tf)
     temp_creds_path = tf.name
 
+# ✅ Scope'da fazladan boşluk yok!
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 try:
     sheets_creds = Credentials.from_service_account_file(temp_creds_path, scopes=SCOPES)
@@ -68,19 +69,29 @@ def get_gemini_response(user_message, full_prompt):
         }
         r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
-        return r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+        response_data = r.json()
+        if 'candidates' in response_data and response_data['candidates']:
+            return response_data['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            return "Anladım, ancak şu anda size yardımcı olamıyorum."
     except Exception as e:
         print(f"Gemini API hatası: {e}")
         return "Dijital asistanım şu anda bir sorunla karşılaştı. Lütfen daha sonra tekrar deneyin."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    incoming_msg = request.form.get('Body', '').strip()
-    print(f"Gelen mesaj: {incoming_msg}")
+    try:
+        incoming_msg = request.form.get('Body', '').strip()
+        print(f"📩 Gelen mesaj: {incoming_msg}")
 
-    full_prompt = get_all_prompts()
-    reply = get_gemini_response(incoming_msg, full_prompt)
+        full_prompt = get_all_prompts()
+        reply = get_gemini_response(incoming_msg, full_prompt)
 
+    except Exception as e:
+        print(f"Webhook genel hatası: {e}")
+        reply = "Merhaba! Şu anda geçici bir teknik sorun yaşıyoruz. Lütfen birkaç dakika sonra tekrar yazın."
+
+    # 📤 Twilio için geçerli TwiML XML yanıtı
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>{reply}</Message>
