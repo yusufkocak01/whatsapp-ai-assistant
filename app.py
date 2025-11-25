@@ -5,13 +5,13 @@ import csv
 
 app = Flask(__name__)
 
-# 🔑 Gemini API anahtarı (Railway Variables'te tanımlı olmalı)
+# 🔑 GEMINI API Anahtarı (Railway Variables'te tanımlı olmalı)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY ortam değişkeni eksik!")
 
-# 📥 CSV'den keyword → rule eşlemelerini yükle
-def load_rules():
+# 📥 prompt.csv dosyasını yükle
+def load_rules_from_csv():
     rules = {}
     try:
         with open("prompt.csv", "r", encoding="utf-8") as f:
@@ -20,23 +20,23 @@ def load_rules():
                 keyword = row["keyword"].strip().lower()
                 rule = row["rule"].strip()
                 rules[keyword] = rule
-        print("✅ Kurallar yüklendi:", list(rules.keys()))
+        print("✅ prompt.csv yüklendi. Anahtar kelimeler:", list(rules.keys()))
     except Exception as e:
-        print("❌ CSV okuma hatası:", e)
+        print("❌ prompt.csv okunamadı:", e)
         rules = {"default": "Yusuf'un dijital asistanıyım."}
     return rules
 
-# Global kural seti (her başlatmada bir kez yüklenir)
-RULES = load_rules()
+# Kuralları uygulama başlangıcında yükle
+RULES = load_rules_from_csv()
 
-def get_ai_response(user_message, instruction):
-    """Gemini'ye kullanıcı mesajı + talimatı gönderir."""
+def get_gemini_response(user_message, rule_instruction):
+    """Gemini API’si ile akıllı cevap üretir."""
     try:
         full_prompt = (
-            f"TALİMAT: {instruction}\n\n"
+            f"TALİMAT: {rule_instruction}\n\n"
             f"KULLANICI MESAJI: {user_message}\n\n"
             "Cevabın 1-3 cümle, Türkçe, samimi, doğal ve profesyonel olsun. "
-            "Asla 'size nasıl yardımcı olabilirim?' gibi kalıplar kullanma."
+            "Hiçbir zaman 'size nasıl yardımcı olabilirim?' gibi kalıplar kullanma."
         )
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
@@ -52,9 +52,9 @@ def get_ai_response(user_message, instruction):
         if 'candidates' in data and data['candidates']:
             return data['candidates'][0]['content']['parts'][0]['text'].strip()
         else:
-            return "Anladım, ama şu an cevap veremiyorum."
+            return "Anladım, ancak şu anda yardımcı olamıyorum."
     except Exception as e:
-        print("Gemini hatası:", e)
+        print("🚨 Gemini Hatası:", e)
         return "Dijital asistanım şu anda bir sorunla karşılaştı."
 
 @app.route('/webhook', methods=['POST'])
@@ -67,11 +67,11 @@ def webhook():
             reply = "Boş mesaj gönderdiniz."
         else:
             # Küçük harfe çevirip CSV'de ara
-            instruction = RULES.get(incoming_msg.lower(), RULES.get("default", "Kullanıcıya doğal ve yardımcı bir cevap ver."))
-            reply = get_ai_response(incoming_msg, instruction)
+            rule = RULES.get(incoming_msg.lower(), RULES.get("default", "Kullanıcıya yardımcı ol."))
+            reply = get_gemini_response(incoming_msg, rule)
 
     except Exception as e:
-        print("Webhook hatası:", e)
+        print("🚨 Webhook Hatası:", e)
         reply = "İşlem sırasında teknik bir sorun oluştu."
 
     # 📤 Twilio için TwiML yanıtı
@@ -85,5 +85,5 @@ def index():
     return "✅ Yusuf'un AI Asistanı (prompt.csv + Gemini)"
 
 if __name__ == '__main__':
-    # 🚧 Port 8080 olarak sabitlendi (Railway'de Networking → Port: 8080 olmalı)
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
