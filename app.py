@@ -31,11 +31,11 @@ def get_all_prompts():
         return "\n\n".join(prompts)
     except Exception as e:
         print(f"Google Sheets okuma hatası: {e}")
-        return "Sen Yusuf'un Dijital Asistanısın. Size nasıl yardımcı olabilirim?"
+        return "Sheets kaynaklı bir sorun var. Sonra yazın, ya da arayın."
 
 def get_gemini_response(user_message, full_prompt):
     if not GEMINI_API_KEY:
-        return "Yardımcı olamıyorum. Teknik bir sorun var."
+        return "Gemini kaynaklı Teknik bir sorun var."
 
     try:
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
@@ -60,7 +60,7 @@ def get_gemini_response(user_message, full_prompt):
         return r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
     except Exception as e:
         print(f"Gemini API hatası: {e}")
-        return "Şu an size yardımcı olamıyorum. Lütfen 'stres evi', 'davet evi' veya 'proje' yazın."
+        return "Dijital asistanım şu anda bir sorun ile karşılaştı. Daha sonra yazın ya da arayın"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -83,3 +83,4 @@ def index():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
+
