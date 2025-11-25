@@ -95,4 +95,3 @@ def debug():
     🔑 GEMINI_API_KEY: {gemini_key[:8]}...<br>
     📊 Google Sheets: {sheets_ok}
     """
-
