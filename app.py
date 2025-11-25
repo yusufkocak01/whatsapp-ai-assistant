@@ -52,7 +52,7 @@ def get_gemini_response(user_message, full_prompt):
         return r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
     except Exception as e:
         print(f"Gemini hatası: {e}")
-        return "Şu an yardımcı olamıyorum. Lütfen 'stres evi', 'davet evi' veya 'proje' yazın."
+        return "Şu an yardımcı dijital asistanımın kafası karıştı. Lütfen gerekliyse arayın."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -72,4 +72,4 @@ def index():
     return "✅ Tek Sütun Prompt Sistemi Aktif"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))) bak bakalım hata var mı burada gemini api var mı mesela
