@@ -17,11 +17,9 @@ sheets_creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
 sheets_client = gspread.authorize(sheets_creds)
 
 def get_all_prompts():
-    """Google Sheets'te A sütunundaki tüm dolu hücreleri al"""
     try:
         sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
-        all_cells = sheet.col_values(1)  # A sütunu = 1
-        # Boş olmayan tüm hücreleri al (başlık varsa 1. satırı atla isterseniz)
+        all_cells = sheet.col_values(1)
         prompts = [cell.strip() for cell in all_cells if cell and cell.strip()]
         return "\n\n".join(prompts)
     except Exception as e:
@@ -72,26 +70,5 @@ def index():
     return "✅ Tek Sütun Prompt Sistemi Aktif"
 
 if __name__ == '__main__':
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))@app.route('/debug', methods=['GET'])
-def debug():
-    # 1. credentials.json var mı?
-    creds_ok = os.path.exists("credentials.json")
-    
-    # 2. Gemini API Key var mı?
-    gemini_key = os.environ.get("GEMINI_API_KEY", "YOK")
-    
-    # 3. Google Sheets okunabiliyor mu?
-    try:
-        sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
-        a1 = sheet.acell("A1").value
-        sheets_ok = f"A1: {a1}"
-    except Exception as e:
-        sheets_ok = f"Hata: {str(e)}"
-    
-    return f"""
-    DEBUG BİLGİSİ<br>
-    ✅ credentials.json mevcut: {creds_ok}<br>
-    🔑 GEMINI_API_KEY: {gemini_key[:8]}...<br>
-    📊 Google Sheets: {sheets_ok}
-    """
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
