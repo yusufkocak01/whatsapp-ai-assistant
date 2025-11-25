@@ -3,25 +3,16 @@
 # app.py
 
 """
-WhatsApp dijital asistan webhooku (Twilio uyumlu).
-
-* prompt.csv (keyword,rules) okur
-* keyword: kullanıcı mesajında aranacak kelime
-* rules: botun cevabı oluşturmak için kullanılacak prompt/metin
-* matched rule -> rules promptunu kullanarak doğal cevap üretir
-* unmatched -> OpenAI varsa ChatGPT tarzı cevap üretir, yoksa fallback
-* BOT ON / BOT OFF (admin numara) handoff desteği
-  """
-  import os
-  import re
-  import time
-  import logging
-  from typing import Dict, Optional
+WhatsApp dijital asistan webhooku (Twilio uyumlu) - BOT ON/OFF özelliği ile
+"""
+import os
+import re
+import time
+import logging
+from typing import Dict
 
 from flask import Flask, request
 import pandas as pd
-
-# optional openai import
 
 try:
 import openai
@@ -30,26 +21,26 @@ openai = None
 
 from twilio.twiml.messaging_response import MessagingResponse
 
-# ---------- Config ----------
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("whatsapp-assistant")
 
 CSV_PATH = os.environ.get("PROMPT_CSV", "prompt.csv")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # optional
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "300"))
 TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0.45"))
 
-# ADMIN_NUMBERS default
+# Admin numaraları
 
 _default_admins = "whatsapp:+905322034617"
 ADMIN_NUMBERS = set(
 n.strip() for n in os.environ.get("ADMIN_NUMBERS", _default_admins).split(",") if n.strip()
 )
 
-HANDOFF_TTL = int(os.environ.get("HANDOFF_TTL_SECONDS", str(60 * 60)))  # default 1 hour
+# BOT handoff state
+
 HANDOFF_STATE: Dict[str, dict] = {}
+HANDOFF_TTL = int(os.environ.get("HANDOFF_TTL_SECONDS", str(60*60)))  # 1 saat default
 
 app = Flask(**name**)
 
@@ -65,10 +56,9 @@ raise ValueError("prompt.csv içinde 'keyword' ve 'rules' sütunları olmalı.")
 return df[["keyword", "rules"]]
 
 def normalize_text(text: str) -> str:
-text_lower = (text or "").lower()
-return re.sub(r"[^\w\s]", "", text_lower)  # noktalama kaldır
+return re.sub(r"[^\w\s]", "", (text or "").lower())
 
-def find_rule_for_text(text: str, df: pd.DataFrame) -> Optional[str]:
+def find_rule_for_text(text: str, df):
 text_norm = normalize_text(text)
 for _, row in df.iterrows():
 k = normalize_text(row.get("keyword", ""))
@@ -79,7 +69,6 @@ return None
 # ---------- OpenAI helper ----------
 
 def generate_reply_from_prompt(rule_prompt: str, user_message: str) -> str:
-"""rules promptunu kullanarak doğal cevap üret"""
 if OPENAI_API_KEY and openai:
 try:
 openai.api_key = OPENAI_API_KEY
@@ -94,7 +83,8 @@ f"Kullanıcı mesajı: "{user_message.strip()}"\n"
 )
 resp = openai.ChatCompletion.create(
 model=OPENAI_MODEL,
-messages=[{"role": "system", "content": system_content}, {"role": "user", "content": user_content}],
+messages=[{"role": "system", "content": system_content},
+{"role": "user", "content": user_content}],
 max_tokens=MAX_TOKENS,
 temperature=TEMPERATURE,
 )
@@ -103,11 +93,7 @@ if content:
 return content
 except Exception as e:
 logger.exception("OpenAI cevap üretme hatası: %s", e)
-
-```
-# fallback: promptu direkt ver ama kullanıcıya soru ekle
 return f"{rule_prompt.strip()} Size nasıl yardımcı olabilirim?"
-```
 
 # ---------- Handoff helpers ----------
 
@@ -117,8 +103,8 @@ return (s or "").strip()
 def is_admin(sender: str) -> bool:
 return sender in ADMIN_NUMBERS
 
-def set_handoff(sender: str, by: str = "admin"):
-HANDOFF_STATE[sender] = {"handed_off": True, "by": by, "since": time.time()}
+def set_handoff(sender: str):
+HANDOFF_STATE[sender] = {"handed_off": True, "since": time.time()}
 
 def clear_handoff(sender: str):
 HANDOFF_STATE.pop(sender, None)
@@ -127,7 +113,7 @@ def check_handoff_active(sender: str) -> bool:
 state = HANDOFF_STATE.get(sender)
 if not state:
 return False
-if HANDOFF_TTL and time.time() - state.get("since", 0) > HANDOFF_TTL:
+if time.time() - state.get("since", 0) > HANDOFF_TTL:
 HANDOFF_STATE.pop(sender, None)
 return False
 return True
@@ -153,11 +139,10 @@ except Exception:
     resp.message("Sunucuda prompt verisi yüklenemedi. Lütfen admin ile iletişime geçin.")
     return str(resp)
 
-# admin commands
 cmd = incoming.lower()
 if is_admin(sender):
     if cmd in ("bot off", "stop bot", "bot kapat", "bot:off"):
-        set_handoff(sender, by="admin")
+        set_handoff(sender)
         resp = MessagingResponse()
         resp.message("Bot devre dışı bırakıldı.")
         return str(resp)
@@ -170,12 +155,10 @@ if is_admin(sender):
 if check_handoff_active(sender):
     return ("", 204)
 
-# normal processing
 rule_prompt = find_rule_for_text(incoming, df)
 if rule_prompt:
     reply = generate_reply_from_prompt(rule_prompt, incoming)
 else:
-    # fallback
     reply = f"Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. Mesajınızı tam anlayamadım. Kısaca ne yapmak istediğinizi yazabilir misiniz?"
 
 resp = MessagingResponse()
