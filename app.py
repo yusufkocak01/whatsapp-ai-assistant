@@ -1,17 +1,15 @@
 from flask import Flask, request
 import gspread
 from google.oauth2.service_account import Credentials
-import requests
 import os
 import json
 import tempfile
 
 app = Flask(__name__)
 
-# 🔧 Ayarlar (✅ TÜM BOŞLUKLAR KALDIRILDI)
+# 🔧 Ayarlar
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
 SHEET_NAME = "baslangic"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # 🧾 Google Sheets kimlik doğrulama
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -23,7 +21,6 @@ with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tf:
     json.dump(creds_dict, tf)
     temp_creds_path = tf.name
 
-# ✅ Scope'da BOŞLUK YOK
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 try:
     sheets_creds = Credentials.from_service_account_file(temp_creds_path, scopes=SCOPES)
@@ -32,51 +29,34 @@ except Exception as e:
     print(f"Google Auth hatası: {e}")
     sheets_client = None
 
-def get_all_prompts():
+def get_reply_from_sheet(user_message):
+    """Kullanıcı mesajını Google Sheets'te A sütununda arar, B sütunundan cevap döner."""
     if not sheets_client:
-        return "Sen Yusuf'un Dijital Asistanısın. Kısa ve samimi cevaplar ver."
+        return "Google Sheets bağlantısı kurulamadı."
+    
     try:
         sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
-        all_cells = sheet.col_values(1)
-        prompts = [cell.strip() for cell in all_cells if cell and cell.strip()]
-        return "\n\n".join(prompts)
+        # A sütunu: anahtar kelimeler, B sütunu: açıklamalar
+        keywords = sheet.col_values(1)  # A sütunu
+        replies = sheet.col_values(2)   # B sütunu
+
+        user_lower = user_message.strip().lower()
+
+        for i, keyword in enumerate(keywords):
+            if not keyword:
+                continue
+            # Tam eşleşme veya içeriyorsa (istediğin gibi ayarlayabilirsin)
+            if user_lower == keyword.lower().strip():
+                if i < len(replies) and replies[i]:
+                    return replies[i]
+                else:
+                    return "Bu anahtar kelime için açıklama tanımlanmamış."
+        
+        return "Malesef bu konuda bilgim yok. 'yardım' yazarak destek alabilirsiniz."
+
     except Exception as e:
         print(f"Google Sheets okuma hatası: {e}")
-        return "Sen Yusuf'un Dijital Asistanısın. Size nasıl yardımcı olabilirim?"
-
-def get_gemini_response(user_message, full_prompt):
-    if not GEMINI_API_KEY:
-        return "Gemini API anahtarı eksik."
-
-    try:
-        # ✅ URL TAMAMEN DÜZELTİLDİ (boşluksuz)
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{
-                "parts": [{
-                    "text": (
-                        f"Aşağıdaki kurallara göre cevap ver. Kurallar mutlaka uygulanacak.\n\n"
-                        f"KURALLAR:\n{full_prompt}\n\n"
-                        f"KULLANICI MESAJI: \"{user_message}\"\n\n"
-                        "Cevabın 1-3 cümle, Türkçe, samimi ve profesyonel olsun. Kuralları unutma."
-                    )
-                }]
-            }],
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            ]
-        }
-        r = requests.post(url, json=payload, timeout=8)
-        r.raise_for_status()
-        response_data = r.json()
-        if 'candidates' in response_data and response_data['candidates']:
-            return response_data['candidates'][0]['content']['parts'][0]['text'].strip()
-        else:
-            return "Anladım, ancak şu anda size yardımcı olamıyorum."
-    except Exception as e:
-        print(f"Gemini API hatası: {e}")
-        return "Dijital asistanım şu anda bir sorunla karşılaştı. Lütfen daha sonra tekrar deneyin."
+        return "Veri tabanıma erişim sırasında teknik bir sorun oluştu."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -84,14 +64,16 @@ def webhook():
         incoming_msg = request.form.get('Body', '').strip()
         print(f"📩 Gelen mesaj: {incoming_msg}")
 
-        full_prompt = get_all_prompts()
-        reply = get_gemini_response(incoming_msg, full_prompt)
+        if not incoming_msg:
+            reply = "Boş mesaj gönderdiniz."
+        else:
+            reply = get_reply_from_sheet(incoming_msg)
 
     except Exception as e:
-        print(f"Webhook genel hatası: {e}")
-        reply = "Merhaba! Şu anda geçici bir teknik sorun yaşıyoruz. Lütfen birkaç dakika sonra tekrar yazın."
+        print(f"Webhook hatası: {e}")
+        reply = "İşlem sırasında bir hata oluştu. Lütfen tekrar deneyin."
 
-    # 📤 Twilio için geçerli TwiML XML yanıtı
+    # 📤 Twilio için TwiML yanıtı
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Message>{reply}</Message>
@@ -99,9 +81,8 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "✅ Yusuf'un AI Asistanı çalışıyor"
+    return "✅ Yusuf'un Anahtar Kelime Asistanı çalışıyor"
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))  # ✅ 8080 → 10000
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
-# Google credentials eklendi - 2025-04-05
