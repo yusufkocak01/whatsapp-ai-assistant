@@ -1,90 +1,120 @@
-from flask import Flask, request
-import openai
 import os
-import csv
+import re
+import logging
+from flask import Flask, request, abort
+import pandas as pd
+
+# Optional OpenAI integration if you want fallback intelligent replies
+try:
+    import openai
+except Exception:
+    openai = None
+
+# Twilio helper for replying via TwiML
+from twilio.twiml.messaging_response import MessagingResponse
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("whatsapp-assistant")
+
+CSV_PATH = os.environ.get("PROMPT_CSV", "prompt.csv")  # değiştirilebilir via env
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")      # opsiyonel
+# Twilio ile doğrudan TwiML döndüreceğimiz için REST client zorunlu değil
 
 app = Flask(__name__)
 
-# 🔑 OpenAI API Anahtarı (Railway Variables'te tanımlı olmalı)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY ortam değişkeni eksik!")
+def load_prompts(csv_path: str):
+    """
+    CSV must have columns: keyword, rules
+    keyword can be a single word or multiple alternatives separated by '|' or ','.
+    """
+    if not os.path.exists(csv_path):
+        logger.warning("prompt.csv bulunamadı: %s", csv_path)
+        return pd.DataFrame(columns=["keyword", "rules"])
+    df = pd.read_csv(csv_path, dtype=str).fillna("")
+    # Normalize columns
+    if "keyword" not in df.columns or "rules" not in df.columns:
+        raise ValueError("prompt.csv içinde 'keyword' ve 'rules' sütunları olmalı.")
+    return df[["keyword", "rules"]]
 
-# OpenAI istemcisini başlat
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+def find_rule_for_text(text: str, df: pd.DataFrame):
+    text_lower = text.lower()
+    matches = []
+    for _, row in df.iterrows():
+        raw_keys = row["keyword"]
+        # split alternatifleri , veya | ile ayır
+        keys = re.split(r"\s*[|,]\s*", raw_keys) if raw_keys else []
+        for k in keys:
+            k = k.strip()
+            if not k:
+                continue
+            # whole-word match (Türkçe'yi basitçe yakalamak için \b kullanıyoruz)
+            pattern = r"\b" + re.escape(k.lower()) + r"\b"
+            if re.search(pattern, text_lower, flags=re.UNICODE):
+                matches.append((k, row["rules"]))
+    # Örnek seçim: ilk eşleşme; daha sofistike mantık istersen burayı değiştirebiliriz.
+    return matches[0][1] if matches else None
 
-# 📥 prompt.csv dosyasını yükle
-def load_rules_from_csv():
-    rules = {}
+def ask_openai(prompt: str):
+    """Opsiyonel: OPENAI_API_KEY varsa kısa bir cevap üretir."""
+    if not OPENAI_API_KEY or openai is None:
+        return None
     try:
-        with open("prompt.csv", "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                keyword = row["keyword"].strip().lower()
-                rule = row["rule"].strip()
-                rules[keyword] = rule
-        print("✅ prompt.csv yüklendi. Anahtar kelimeler:", list(rules.keys()))
-    except Exception as e:
-        print("❌ prompt.csv okunamadı:", e)
-        rules = {"default": "Yusuf'un dijital asistanıyım."}
-    return rules
-
-# Kuralları uygulama başlangıcında yükle
-RULES = load_rules_from_csv()
-
-def get_chatgpt_response(user_message, rule_instruction):
-    """ChatGPT ile akıllı cevap üretir."""
-    try:
-        system_message = (
-            "Sen Yusuf'un Dijital Asistanısın. Aşağıdaki talimata göre cevap ver. "
-            "Cevabın 1-3 cümle, Türkçe, samimi, doğal ve profesyonel olsun. "
-            "Hiçbir zaman 'size nasıl yardımcı olabilirim?' gibi kalıplar kullanma."
+        openai.api_key = OPENAI_API_KEY
+        # Basit chat completion isteği (model adı organizasyonuna göre değişebilir)
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",  # hesabına göre uygun olanı koy
+            messages=[{"role":"system","content":"Türkçe yardım asistanısın. Kısa ve nazik cevap ver."},
+                      {"role":"user","content":prompt}],
+            max_tokens=250,
+            temperature=0.6
         )
-        user_prompt = f"TALİMAT: {rule_instruction}\n\nKULLANICI MESAJI: {user_message}"
-
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.7,
-            max_tokens=150
-        )
-        return response.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        print("🚨 ChatGPT Hatası:", e)
-        return "Dijital asistanım şu anda bir sorunla karşılaştı."
+        logger.exception("OpenAI çağrısında hata: %s", e)
+        return None
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook():
+    # Twilio'dan form-data ile gelir, Body paramında mesaj vardır
+    incoming = (request.values.get("Body") or "").strip()
+    if not incoming:
+        return ("", 204)
+
+    logger.info("Gelen mesaj: %s", incoming)
+
+    # Her istek için güncel CSV'yi oku (güncelleme kolaylığı için)
     try:
-        incoming_msg = request.form.get('Body', '').strip()
-        print(f"📩 Gelen mesaj: '{incoming_msg}'")
-
-        if not incoming_msg:
-            reply = "Boş mesaj gönderdiniz."
-        else:
-            rule = RULES.get(incoming_msg.lower(), RULES.get("default", "Kullanıcıya yardımcı ol."))
-            reply = get_chatgpt_response(incoming_msg, rule)
-
+        df = load_prompts(CSV_PATH)
     except Exception as e:
-        print("🚨 Webhook Hatası:", e)
-        reply = "İşlem sırasında teknik bir sorun oluştu."
+        logger.exception("prompt.csv yüklenirken hata")
+        resp = MessagingResponse()
+        resp.message("Sunucuda prompt verisi yüklenemedi. Lütfen admin ile iletişime geçin.")
+        return str(resp)
 
-    # 📤 Twilio için TwiML yanıtı
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Message>{reply}</Message>
-</Response>""", 200, {'Content-Type': 'text/xml'}
+    matched_rule = find_rule_for_text(incoming, df)
 
-@app.route('/')
+    if matched_rule:
+        # Eğer rules sütunu birden fazla alternatif içeriyorsa, olduğu gibi gönderiyoruz.
+        reply = f"{matched_rule}\n\nBen dijital asistanınızım. Size nasıl yardımcı olabilirim? Lütfen ne yapmak istediğinizi kısaca yazın."
+    else:
+        # Eşleşme yoksa OpenAI ile try et (eğer varsa), yoksa basit fallback
+        openai_reply = ask_openai(f"Kullanıcı mesajı: {incoming}\nKısa ve yardımcı bir cevap ver.")
+        if openai_reply:
+            reply = f"{openai_reply}\n\n(Ben dijital asistanınızım.)"
+        else:
+            reply = ("Merhaba — ben dijital asistanınızım. " 
+                     "Mesajınızı tam anlayamadım. Kısaca ne yapmak istediğinizi açıklar mısınız? "
+                     "Örn: 'randevu oluştur', 'fiyat bilgisi', 'bilgi: X' vb.")
+
+    resp = MessagingResponse()
+    resp.message(reply)
+    logger.info("Gönderilen cevap: %s", reply)
+    return str(resp)
+
+@app.route("/", methods=["GET"])
 def index():
-    return "✅ Yusuf'un AI Asistanı (prompt.csv + ChatGPT)"
+    return "WhatsApp Dijital Asistan webhooku çalışıyor."
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-#denemec
-
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
