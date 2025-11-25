@@ -50,8 +50,8 @@ def get_gemini_response(user_message, full_prompt):
 
     try:
         # ✅ URL'de BOŞLUK YOK: "gemini-1.5-flash:generateContent"
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        payload = {
+url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+payload = {
             "contents": [{
                 "parts": [{
                     "text": (
@@ -105,4 +105,5 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 # Google credentials eklendi - 2025-04-05
+
 
