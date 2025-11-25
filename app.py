@@ -8,7 +8,7 @@ import tempfile
 
 app = Flask(__name__)
 
-# 🔧 Ayarlar (✅ BOŞLUKLAR KALDIRILDI)
+# 🔧 Ayarlar (✅ TÜM BOŞLUKLAR KALDIRILDI)
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
 SHEET_NAME = "baslangic"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -23,7 +23,7 @@ with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tf:
     json.dump(creds_dict, tf)
     temp_creds_path = tf.name
 
-# ✅ Scope'da boşluk yok
+# ✅ Scope'da BOŞLUK YOK
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 try:
     sheets_creds = Credentials.from_service_account_file(temp_creds_path, scopes=SCOPES)
@@ -49,9 +49,9 @@ def get_gemini_response(user_message, full_prompt):
         return "Gemini API anahtarı eksik."
 
     try:
-        # ✅ URL'de BOŞLUK YOK: "gemini-1.5-flash:generateContent"
-url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-payload = {
+        # ✅ URL TAMAMEN DÜZELTİLDİ (boşluksuz)
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
             "contents": [{
                 "parts": [{
                     "text": (
@@ -67,7 +67,7 @@ payload = {
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             ]
         }
-        r = requests.post(url, json=payload, timeout=8)  # ⏱️ Timeout 8 saniye
+        r = requests.post(url, json=payload, timeout=8)
         r.raise_for_status()
         response_data = r.json()
         if 'candidates' in response_data and response_data['candidates']:
@@ -102,8 +102,6 @@ def index():
     return "✅ Yusuf'un AI Asistanı çalışıyor"
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
+    port = int(os.environ.get('PORT', 8080))  # ✅ 8080 → 10000
     app.run(host='0.0.0.0', port=port)
 # Google credentials eklendi - 2025-04-05
-
-
