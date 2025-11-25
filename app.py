@@ -73,3 +73,25 @@ def index():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))) bak bakalım hata var mı burada gemini api var mı mesela
+@app.route('/debug', methods=['GET'])
+def debug():
+    # 1. credentials.json var mı?
+    creds_ok = os.path.exists("credentials.json")
+    
+    # 2. Gemini API Key var mı?
+    gemini_key = os.environ.get("GEMINI_API_KEY", "YOK")
+    
+    # 3. Google Sheets okunabiliyor mu?
+    try:
+        sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
+        a1 = sheet.acell("A1").value
+        sheets_ok = f"A1: {a1}"
+    except Exception as e:
+        sheets_ok = f"Hata: {str(e)}"
+    
+    return f"""
+    DEBUG BİLGİSİ<br>
+    ✅ credentials.json mevcut: {creds_ok}<br>
+    🔑 GEMINI_API_KEY: {gemini_key[:8]}...<br>
+    📊 Google Sheets: {sheets_ok}
+    """
