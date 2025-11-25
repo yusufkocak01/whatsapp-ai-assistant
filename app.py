@@ -2,20 +2,21 @@
 # app.py
 """
 WhatsApp dijital asistan webhooku (Twilio uyumlu).
-Özellikler:
-- prompt.csv (keyword, rules) okur
-- gelen mesajdaki keyword'e göre rules metnini OpenAI'ye prompt olarak verir
-- OpenAI cevabını echo (rules'un aynen dönmesini) kontrol ederek gerekirse fallback uygular
-- Handoff mekanizması: admin numaraları BOT OFF / BOT ON ile botu devre dışı / aktif edebilir
-- Eğer OpenAI yoksa güvenli fallback gönderir
-- Twilio MessagingResponse ile TwiML döner
+- prompt.csv (keyword,rules) okur
+- keyword: virgül veya | ile ayrılmış alternatifler
+- rules: virgül veya | ile ayrılmış örnek cevaplar
+- matched rule -> önce rules içinden rastgele bir örnek alınır; eğer OPENAI varsa bu örnekler referans verilerek
+  OpenAI'den daha doğal bir cevap üretilir (ör: "İyiyim, teşekkürler — ya sen?").
+- unmatched -> OpenAI varsa ChatGPT tarzı cevap üretir; yoksa fallback.
+- BOT ON / BOT OFF (admin numara) handoff desteği
 """
 import os
 import re
 import time
 import logging
+import random
 import difflib
-from typing import Dict
+from typing import Dict, List, Optional
 
 from flask import Flask, request
 import pandas as pd
@@ -33,23 +34,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("whatsapp-assistant")
 
 CSV_PATH = os.environ.get("PROMPT_CSV", "prompt.csv")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # optional, required for OpenAI usage
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")  # optional, required for ChatGPT-like replies
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "250"))
+MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "300"))
 TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0.45"))
 ECHO_SIMILARITY_THRESHOLD = float(os.environ.get("ECHO_SIMILARITY_THRESHOLD", "0.45"))
 
-# ADMIN_NUMBERS default as requested. You may override by setting the env var ADMIN_NUMBERS.
-# Expected format examples: "whatsapp:+905322034617,whatsapp:+905551112233"
+# ADMIN_NUMBERS default as requested.
 _default_admins = "whatsapp:+905322034617"
 ADMIN_NUMBERS = set(
     n.strip() for n in os.environ.get("ADMIN_NUMBERS", _default_admins).split(",") if n.strip()
 )
 
-# Handoff TTL in seconds (optional). If >0, handoff will auto-resume after TTL seconds.
 HANDOFF_TTL = int(os.environ.get("HANDOFF_TTL_SECONDS", str(60 * 60)))  # default 1 hour
 
-# In-memory handoff state (key = sender phone string)
 HANDOFF_STATE: Dict[str, dict] = {}
 
 app = Flask(__name__)
@@ -57,9 +55,6 @@ app = Flask(__name__)
 # ---------- Helper functions ----------
 
 def load_prompts(csv_path: str):
-    """
-    Load prompt.csv with columns: keyword, rules
-    """
     if not os.path.exists(csv_path):
         logger.warning("prompt.csv bulunamadı: %s", csv_path)
         return pd.DataFrame(columns=["keyword", "rules"])
@@ -68,29 +63,28 @@ def load_prompts(csv_path: str):
         raise ValueError("prompt.csv içinde 'keyword' ve 'rules' sütunları olmalı.")
     return df[["keyword", "rules"]]
 
-def find_rule_for_text(text: str, df: pd.DataFrame):
-    """
-    Find the first matching rule for the incoming text using whole-word matching.
-    Keys in 'keyword' can be separated by ',' or '|'.
-    """
+def split_alternatives(s: str) -> List[str]:
+    """Split by ',' or '|' and strip; ignore empty entries"""
+    if not s:
+        return []
+    parts = re.split(r"\s*[|,]\s*", s)
+    return [p.strip() for p in parts if p and p.strip()]
+
+def find_rule_for_text(text: str, df: pd.DataFrame) -> Optional[str]:
     text_lower = (text or "").lower()
     for _, row in df.iterrows():
         raw_keys = row.get("keyword", "") or ""
-        keys = re.split(r"\s*[|,]\s*", raw_keys) if raw_keys else []
+        keys = split_alternatives(raw_keys)
         for k in keys:
-            k = k.strip()
             if not k:
                 continue
-            # whole-word boundary match
+            # whole-word match; note: \b works for many cases
             pattern = r"\b" + re.escape(k.lower()) + r"\b"
             if re.search(pattern, text_lower, flags=re.UNICODE):
                 return row.get("rules", "")
     return None
 
 def sanitize_rules_for_prompt(rules_text: str) -> str:
-    """
-    Make rules safe/compact to place into a system prompt.
-    """
     if not rules_text:
         return ""
     s = " ".join(line.strip() for line in rules_text.splitlines() if line.strip())
@@ -103,49 +97,33 @@ def similarity(a: str, b: str) -> float:
         return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
 
-def pick_followup_question_from_rules(rules_text: str):
-    """
-    Heuristic follow-up question generation based on keywords inside rules_text.
-    """
-    rt = (rules_text or "").lower()
-    if any(k in rt for k in ["randevu", "randevu oluştur", "tarih", "saat"]):
-        return "Hangi tarih ve saat için randevu istiyorsunuz?"
-    if any(k in rt for k in ["fiyat", "ücret", "ücretlendirme", "fiyat bilgisi"]):
-        return "Hangi hizmet için fiyat almak istiyorsunuz? (örn: palyaço, mehter)"
-    if any(k in rt for k in ["iletişim", "telefon", "mail", "e-posta"]):
-        return "İletişim bilgisi mi istiyorsunuz? Telefon ya da e-posta hangisini tercih edersiniz?"
-    if any(k in rt for k in ["bilgi", "detay", "açıklama"]):
-        return "Hangi konuda detay istiyorsunuz?"
-    return "Size nasıl yardımcı olabilirim? Hangi konuda destek istersiniz?"
+# ---------- OpenAI helpers ----------
 
-def generate_from_openai(rules_text: str, user_message: str):
+def generate_from_openai_with_examples(example_responses: List[str], user_message: str) -> Optional[str]:
     """
-    Use OpenAI to generate a reply based on rules_text as an instruction.
-    Returns generated reply or None if failed or echo detected.
+    Provide example responses and ask OpenAI to produce a short, conversational Turkish reply
+    that is consistent with those examples. Returns None if OpenAI not configured or echo detected.
     """
     if not OPENAI_API_KEY or openai is None:
-        logger.debug("OpenAI konfigürasyon yok veya paket yüklenmemiş.")
+        logger.debug("OpenAI yok veya paket yüklü değil.")
         return None
 
     try:
         openai.api_key = OPENAI_API_KEY
-        safe_rules = sanitize_rules_for_prompt(rules_text)
 
+        # Build an instruction that gives examples and asks for a natural reply
+        examples_text = "Örnek cevaplar: " + "; ".join(example_responses) if example_responses else ""
         system_content = (
-            "You are a Turkish conversational assistant. Follow the instructions below to produce a "
-            "natural, helpful reply. DO NOT repeat or echo the instruction text verbatim to the user. "
-            "Use the instruction to shape behavior but do not output the instruction itself.\n\n"
-            "INSTRUCTIONS: " + safe_rules
+            "You are a Turkish conversational assistant. Produce a short, natural reply in Turkish. "
+            "Do NOT output the instruction text or the example list verbatim. Use the examples as guidance for tone and possible phrasing.\n\n"
+            f"{examples_text}\n\n"
+            "Important: do not repeat the example list exactly; instead generate a natural reply similar in style."
         )
-
         user_content = (
             f"Kullanıcının mesajı: \"{user_message.strip()}\"\n\n"
-            "Talep: Kısa, nazik ve konuşma başlatıcı bir Türkçe cevap üret. "
-            "Cevabında:\n"
-            "1) Kendini bir cümlede 'Yusuf Koçak'ın dijital asistanı' olarak tanıt.\n"
-            "2) Kullanıcının mesajına uygun doğal bir yanıt ver.\n"
-            "3) Konuşmayı sürdürecek, netleştirici bir soru sor.\n"
-            "NOT: Talimat metnini aynen tekrar etme."
+            "Görev: Bu kullanıcıya kısa, nazik ve konuşma başlatıcı bir cevap üret. "
+            "Cevapında kendini tek cümlede 'Yusuf Koçak'ın dijital asistanı' olarak tanıt ve sonuna konuşmayı sürdürecek bir soru ekle. "
+            "Eğer örnek cevaplar verilmişse onlardan esinlen, fakat aynısını yazma."
         )
 
         resp = openai.ChatCompletion.create(
@@ -174,31 +152,67 @@ def generate_from_openai(rules_text: str, user_message: str):
 
         content = content.strip()
 
-        # Check for echo: similarity with rules or direct inclusion
-        sim = similarity(content, safe_rules)
-        logger.info("OpenAI content similarity to rules: %.3f", sim)
-        if sim >= ECHO_SIMILARITY_THRESHOLD or safe_rules in content:
-            logger.info("Detected likely echoing of rules (sim >= %.3f).", ECHO_SIMILARITY_THRESHOLD)
-            return None
+        # Echo detection: if content is too similar to any example, treat as echo
+        for ex in example_responses:
+            sim = similarity(content, ex)
+            logger.info("Similarity between generated content and example '%s' => %.3f", ex[:30], sim)
+            if sim >= ECHO_SIMILARITY_THRESHOLD:
+                logger.info("Detected likely echo to example; rejecting.")
+                return None
 
-        # Avoid some obvious forbidden phrases that indicate echo
-        lowerc = content.lower()
-        if "sen de aynı türden" in lowerc or "talimat" in lowerc or "yönerge" in lowerc:
+        # also ensure it doesn't contain instruction strings
+        lower = content.lower()
+        if "örnek cevap" in lower or "talimat" in lower or "sen de aynı türden" in lower:
             logger.info("Detected forbidden phrase in response; treating as echo.")
             return None
 
         return content
+
     except Exception as e:
         logger.exception("OpenAI çağrısı sırasında hata: %s", e)
         return None
 
-# ---------- Handoff helpers ----------
+def generate_freeform_from_openai(user_message: str) -> Optional[str]:
+    """
+    If there is no matched rule, ask OpenAI to chat like ChatGPT in Turkish.
+    """
+    if not OPENAI_API_KEY or openai is None:
+        return None
+    try:
+        openai.api_key = OPENAI_API_KEY
+        system_content = (
+            "You are a helpful Turkish conversational assistant (ChatGPT-like). "
+            "Answer the user's message in Turkish in a friendly and concise way. "
+            "Introduce yourself briefly as 'Yusuf Koçak'ın dijital asistanı' if appropriate."
+        )
+        user_content = f"Kullanıcının mesajı: \"{user_message.strip()}\"\n\nKısa ve doğal bir Türkçe cevap ver."
 
+        resp = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+        )
+        if not resp or not getattr(resp, "choices", None):
+            return None
+        choice0 = resp.choices[0]
+        content = None
+        if getattr(choice0, "message", None):
+            content = choice0.message.get("content")
+        elif getattr(choice0, "text", None):
+            content = choice0.text
+        if content:
+            return content.strip()
+        return None
+    except Exception as e:
+        logger.exception("OpenAI freeform hata: %s", e)
+        return None
+
+# ---------- Handoff helpers ----------
 def normalize_sender(s: str) -> str:
-    """
-    Normalize Twilio 'From' format. Usually Twilio gives 'whatsapp:+905...' — keep as is.
-    If other formats expected, extend here.
-    """
     return (s or "").strip()
 
 def is_admin(sender: str) -> bool:
@@ -215,16 +229,13 @@ def check_handoff_active(sender: str) -> bool:
     if not state:
         return False
     if HANDOFF_TTL and time.time() - state.get("since", 0) > HANDOFF_TTL:
-        # expire
         HANDOFF_STATE.pop(sender, None)
         return False
     return True
 
 # ---------- Routes ----------
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # Get message and sender
     incoming = (request.values.get("Body") or "").strip()
     sender_raw = (request.values.get("From") or request.values.get("from") or "").strip()
     sender = normalize_sender(sender_raw)
@@ -232,9 +243,9 @@ def webhook():
     if not incoming:
         return ("", 204)
 
-    logger.info("Gelen mesaj (sender=%s): %s", sender, incoming[:1000])
+    logger.info("Gelen mesaj (sender=%s): %s", sender, incoming[:500])
 
-    # Load prompts
+    # load prompts
     try:
         df = load_prompts(CSV_PATH)
     except Exception as e:
@@ -243,58 +254,68 @@ def webhook():
         resp.message("Sunucuda prompt verisi yüklenemedi. Lütfen admin ile iletişime geçin.")
         return str(resp)
 
-    # --- Admin commands (only from ADMIN_NUMBERS) ---
+    # admin commands
     cmd = incoming.strip().lower()
     if is_admin(sender):
         if cmd in ("bot off", "stop bot", "bot kapat", "bot:off"):
             set_handoff(sender, by="admin")
             resp = MessagingResponse()
             resp.message("Bot devre dışı bırakıldı. Artık gelen mesajlara otomatik cevap gönderilmeyecek.")
-            logger.info("Admin %s set BOT OFF for sender %s", sender, sender)
+            logger.info("Admin %s BOT OFF for %s", sender, sender)
             return str(resp)
         if cmd in ("bot on", "start bot", "bot aç", "bot:on"):
             clear_handoff(sender)
             resp = MessagingResponse()
             resp.message("Bot tekrar aktif edildi.")
-            logger.info("Admin %s set BOT ON for sender %s", sender, sender)
+            logger.info("Admin %s BOT ON for %s", sender, sender)
             return str(resp)
 
-    # --- If handoff active for this sender, do not send bot replies ---
+    # if handoff active -> do not reply (operator will handle)
     if check_handoff_active(sender):
-        logger.info("Handoff aktif - bot cevap üretmiyor for sender %s", sender)
-        # Optionally, you could forward message to operator or log it for later.
-        # Return 204 or empty TwiML to acknowledge webhook.
+        logger.info("Handoff aktif, bot cevap üretmiyor for %s", sender)
         return ("", 204)
 
-    # --- Normal bot processing ---
-    matched_rule = find_rule_for_text(incoming, df)
+    # normal processing
+    matched_rules_text = find_rule_for_text(incoming, df)
     reply = None
 
-    if matched_rule:
-        logger.info("Eşleşen rule bulundu - OpenAI ile cevap üretilecek.")
-        ai_reply = generate_from_openai(matched_rule, incoming)
+    if matched_rules_text:
+        # Split the rules into candidate example replies
+        candidates = split_alternatives(matched_rules_text)
+        # Prefer OpenAI-generated natural reply using examples (if available)
+        ai_reply = None
+        if candidates and OPENAI_API_KEY and openai is not None:
+            ai_reply = generate_from_openai_with_examples(candidates, incoming)
         if ai_reply:
             reply = ai_reply
-            logger.info("OpenAI cevabı kullanılacak (len=%d).", len(reply))
         else:
-            logger.info("OpenAI yok veya echo tespit edildi -> fallback kullanılıyor.")
-            question = pick_followup_question_from_rules(matched_rule)
-            reply = f"Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. {question}"
+            # If no OpenAI or OpenAI refused due to echo detection, pick a random candidate
+            if candidates:
+                chosen = random.choice(candidates)
+                # Make reply slightly friendlier: add assistant intro and a follow-up question
+                followup = pick_followup_question_from_rules(matched_rules_text) if 'pick_followup_question_from_rules' in globals() else ""
+                # If chosen already is a short phrase like 'İyiyim', we can extend it naturally:
+                if len(chosen) < 40:
+                    reply = f"{chosen}. Ben Yusuf Koçak'ın dijital asistanıyım. {followup}"
+                else:
+                    reply = f"{chosen} Ben Yusuf Koçak'ın dijital asistanıyım. {followup}"
+            else:
+                # no candidates: fallback to a general question
+                reply = "Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. Size nasıl yardımcı olabilirim?"
     else:
-        logger.info("Herhangi bir rule eşleşmedi - OpenAI fallback deneniyor.")
-        ai_reply = generate_from_openai(
-            "Kısa, nazik ve yardımcı bir Türkçe dijital asistanı gibi cevap ver.",
-            incoming
-        )
+        # no rule matched -> freeform OpenAI chat if available
+        ai_reply = generate_freeform_from_openai(incoming)
         if ai_reply:
             reply = ai_reply
         else:
+            # fallback if OpenAI not available
             reply = (
                 "Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. "
-                "Mesajınızı tam anlayamadım. Kısaca ne yapmak istediğinizi açıklar mısınız? "
-                "Örn: 'randevu oluştur', 'fiyat bilgisi', 'bilgi: X' vb."
+                "Mesajınızı tam anlayamadım. Kısaca ne yapmak istediğinizi yazabilir misiniz? "
+                "Örneğin: 'randevu oluştur', 'fiyat bilgisi', 'iletişim' vb."
             )
 
+    # send via Twilio TwiML
     resp = MessagingResponse()
     resp.message(reply)
     logger.info("Gönderilen cevap (sender=%s, len=%d): %s", sender, len(reply), reply[:300])
@@ -304,7 +325,17 @@ def webhook():
 def index():
     return "WhatsApp Dijital Asistan webhooku çalışıyor."
 
-# ---------- Run ----------
+# ---------- small fallback for functions used above (to keep code self-contained) ----------
+def pick_followup_question_from_rules(rules_text: str):
+    rt = (rules_text or "").lower()
+    if any(k in rt for k in ["randevu", "tarih", "saat"]):
+        return "Hangi tarih ve saat için istersiniz?"
+    if any(k in rt for k in ["fiyat", "ücret"]):
+        return "Hangi hizmet için fiyat almak istiyorsunuz?"
+    if any(k in rt for k in ["iletişim", "telefon", "mail", "e-posta"]):
+        return "Telefon mu yoksa e-posta mı tercih edersiniz?"
+    return "Size nasıl yardımcı olabilirim? Hangi konuda yardım istersiniz?"
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
