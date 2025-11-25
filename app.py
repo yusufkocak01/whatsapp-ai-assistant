@@ -10,7 +10,7 @@ app = Flask(__name__)
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
 SHEET_NAME = "baslangic"
 TWILIO_PHONE_NUMBER = "+14155238886"  # Sandbox numarası
-OPENROUTER_API_KEY = "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"
+OPENROUTER_API_KEY = "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"
 OPENROUTER_MODEL = "openai/gpt-4o-mini"
 
 # Google Sheets
@@ -76,3 +76,4 @@ def index():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+
