@@ -8,23 +8,22 @@ import tempfile
 
 app = Flask(__name__)
 
-# 🔧 Ayarlar (düzeltildi: fazladan boşluklar kaldırıldı)
+# 🔧 Ayarlar (✅ BOŞLUKLAR KALDIRILDI)
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
 SHEET_NAME = "baslangic"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 🧾 Google Sheets kimlik doğrulama (Railway uyumlu)
+# 🧾 Google Sheets kimlik doğrulama
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 if not GOOGLE_CREDENTIALS_JSON:
     raise ValueError("GOOGLE_CREDENTIALS_JSON ortam değişkeni eksik!")
 
-# Geçici dosya olarak credentials oluştur
 creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tf:
     json.dump(creds_dict, tf)
     temp_creds_path = tf.name
 
-# ✅ Scope'da fazladan boşluk yok!
+# ✅ Scope'da boşluk yok
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 try:
     sheets_creds = Credentials.from_service_account_file(temp_creds_path, scopes=SCOPES)
@@ -38,7 +37,7 @@ def get_all_prompts():
         return "Sen Yusuf'un Dijital Asistanısın. Kısa ve samimi cevaplar ver."
     try:
         sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
-        all_cells = sheet.col_values(1)  # A sütunu
+        all_cells = sheet.col_values(1)
         prompts = [cell.strip() for cell in all_cells if cell and cell.strip()]
         return "\n\n".join(prompts)
     except Exception as e:
@@ -50,6 +49,7 @@ def get_gemini_response(user_message, full_prompt):
         return "Gemini API anahtarı eksik."
 
     try:
+        # ✅ URL'de BOŞLUK YOK: "gemini-1.5-flash:generateContent"
         url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         payload = {
             "contents": [{
@@ -67,7 +67,7 @@ def get_gemini_response(user_message, full_prompt):
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             ]
         }
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=8)  # ⏱️ Timeout 8 saniye
         r.raise_for_status()
         response_data = r.json()
         if 'candidates' in response_data and response_data['candidates']:
@@ -105,5 +105,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
 # Google credentials eklendi - 2025-04-05
-
-
