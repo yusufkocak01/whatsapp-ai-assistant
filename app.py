@@ -202,8 +202,7 @@ def webhook():
         else:
             reply = (
                 "Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. "
-                "Mesajınızı tam anlayamadım. Kısaca ne yapmak istediğinizi açıklar mısınız? "
-                "Örn: 'randevu oluştur', 'fiyat bilgisi', 'bilgi: X' vb."
+                "Bununla ilgili hazır bir cevabım yok. Yusuf Koçak müsait olunca size ulaşacaktır."
             )
 
     resp = MessagingResponse()
@@ -218,3 +217,4 @@ def index():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
