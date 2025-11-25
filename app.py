@@ -1,77 +1,78 @@
 from flask import Flask, request
-import gspread
-from google.oauth2.service_account import Credentials
+import requests
 import os
-import json
-import tempfile
+import csv
 
 app = Flask(__name__)
 
-# 🔧 Ayarlar
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc/edit?usp=sharing"
-SHEET_NAME = "baslangic"
+# 🔑 Gemini API anahtarı (Railway Variables'te tanımlı olmalı)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY ortam değişkeni eksik!")
 
-# 🧾 Google Sheets kimlik doğrulama
-GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-if not GOOGLE_CREDENTIALS_JSON:
-    raise ValueError("GOOGLE_CREDENTIALS_JSON ortam değişkeni eksik!")
-
-creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tf:
-    json.dump(creds_dict, tf)
-    temp_creds_path = tf.name
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-try:
-    sheets_creds = Credentials.from_service_account_file(temp_creds_path, scopes=SCOPES)
-    sheets_client = gspread.authorize(sheets_creds)
-except Exception as e:
-    print(f"Google Auth hatası: {e}")
-    sheets_client = None
-
-def get_reply_from_sheet(user_message):
-    """Kullanıcı mesajını Google Sheets'te A sütununda arar, B sütunundan cevap döner."""
-    if not sheets_client:
-        return "Google Sheets bağlantısı kurulamadı."
-    
+# 📥 CSV'den keyword → rule eşlemelerini yükle
+def load_rules():
+    rules = {}
     try:
-        sheet = sheets_client.open_by_url(SPREADSHEET_URL).worksheet(SHEET_NAME)
-        # A sütunu: anahtar kelimeler, B sütunu: açıklamalar
-        keywords = sheet.col_values(1)  # A sütunu
-        replies = sheet.col_values(2)   # B sütunu
-
-        user_lower = user_message.strip().lower()
-
-        for i, keyword in enumerate(keywords):
-            if not keyword:
-                continue
-            # Tam eşleşme veya içeriyorsa (istediğin gibi ayarlayabilirsin)
-            if user_lower == keyword.lower().strip():
-                if i < len(replies) and replies[i]:
-                    return replies[i]
-                else:
-                    return "Bu anahtar kelime için açıklama tanımlanmamış."
-        
-        return "Malesef bu konuda bilgim yok. 'yardım' yazarak destek alabilirsiniz."
-
+        with open("prompt.csv", "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                keyword = row["keyword"].strip().lower()
+                rule = row["rule"].strip()
+                rules[keyword] = rule
+        print("✅ Kurallar yüklendi:", list(rules.keys()))
     except Exception as e:
-        print(f"Google Sheets okuma hatası: {e}")
-        return "Veri tabanıma erişim sırasında teknik bir sorun oluştu."
+        print("❌ CSV okuma hatası:", e)
+        rules = {"default": "Yusuf'un dijital asistanıyım."}
+    return rules
+
+# Global kural seti (her başlatmada bir kez yüklenir)
+RULES = load_rules()
+
+def get_ai_response(user_message, instruction):
+    """Gemini'ye kullanıcı mesajı + talimatı gönderir."""
+    try:
+        full_prompt = (
+            f"TALİMAT: {instruction}\n\n"
+            f"KULLANICI MESAJI: {user_message}\n\n"
+            "Cevabın 1-3 cümle, Türkçe, samimi, doğal ve profesyonel olsun. "
+            "Asla 'size nasıl yardımcı olabilirim?' gibi kalıplar kullanma."
+        )
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": full_prompt}]}],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            ]
+        }
+        response = requests.post(url, json=payload, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        if 'candidates' in data and data['candidates']:
+            return data['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            return "Anladım, ama şu an cevap veremiyorum."
+    except Exception as e:
+        print("Gemini hatası:", e)
+        return "Dijital asistanım şu anda bir sorunla karşılaştı."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         incoming_msg = request.form.get('Body', '').strip()
-        print(f"📩 Gelen mesaj: {incoming_msg}")
+        print(f"📩 Gelen mesaj: '{incoming_msg}'")
 
         if not incoming_msg:
             reply = "Boş mesaj gönderdiniz."
         else:
-            reply = get_reply_from_sheet(incoming_msg)
+            # Küçük harfe çevirip CSV'de ara
+            instruction = RULES.get(incoming_msg.lower(), RULES.get("default", "Kullanıcıya doğal ve yardımcı bir cevap ver."))
+            reply = get_ai_response(incoming_msg, instruction)
 
     except Exception as e:
-        print(f"Webhook hatası: {e}")
-        reply = "İşlem sırasında bir hata oluştu. Lütfen tekrar deneyin."
+        print("Webhook hatası:", e)
+        reply = "İşlem sırasında teknik bir sorun oluştu."
 
     # 📤 Twilio için TwiML yanıtı
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -81,8 +82,8 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "✅ Yusuf'un Anahtar Kelime Asistanı çalışıyor"
+    return "✅ Yusuf'un AI Asistanı (prompt.csv + Gemini)"
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+    # 🚧 Port 8080 olarak sabitlendi (Railway'de Networking → Port: 8080 olmalı)
+    app.run(host='0.0.0.0', port=8080)
