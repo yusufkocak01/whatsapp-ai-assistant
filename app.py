@@ -5,6 +5,7 @@ import re
 import logging
 from flask import Flask, request
 import pandas as pd
+import difflib
 
 # OpenAI (opsiyonel ama bu versiyon OpenAI ile rules -> cevap üretir)
 try:
@@ -21,7 +22,9 @@ CSV_PATH = os.environ.get("PROMPT_CSV", "prompt.csv")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "250"))
-TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0.6"))
+TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0.45"))
+# similarity threshold (0..1) above which we consider model to be "echoing" the rules
+ECHO_SIMILARITY_THRESHOLD = float(os.environ.get("ECHO_SIMILARITY_THRESHOLD", "0.45"))
 
 app = Flask(__name__)
 
@@ -37,7 +40,7 @@ def load_prompts(csv_path: str):
 def find_rule_for_text(text: str, df: pd.DataFrame):
     text_lower = text.lower()
     for _, row in df.iterrows():
-        raw_keys = row["keyword"]
+        raw_keys = row["keyword"] or ""
         keys = re.split(r"\s*[|,]\s*", raw_keys) if raw_keys else []
         for k in keys:
             k = k.strip()
@@ -49,18 +52,34 @@ def find_rule_for_text(text: str, df: pd.DataFrame):
     return None
 
 def sanitize_rules_for_prompt(rules_text: str) -> str:
-    """
-    Küçük işlem: kuralları prompt içinde kullanmaya güvenli hale getir.
-    (ör: fazlaca uzunsa kısalt, tehlikeli direktif varsa kaldır vb.)
-    Bu fonksiyonu ihtiyaca göre genişletebilirsin.
-    """
     if not rules_text:
         return ""
-    # Basit: satır başı trim, uzunluğu sınırlama
     s = " ".join(line.strip() for line in rules_text.splitlines() if line.strip())
-    if len(s) > 1000:
-        s = s[:1000] + "..."
+    if len(s) > 1200:
+        s = s[:1200] + "..."
     return s
+
+def similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+def pick_followup_question_from_rules(rules_text: str):
+    """
+    Basit heuristic: rules içinde geçen anahtar kelimelere göre soru üret.
+    Eğer bir şey bulunamazsa genel bir konuşma açıcı soru döndürür.
+    """
+    rt = rules_text.lower()
+    if any(k in rt for k in ["randevu", "randevu oluştur", "tarih", "saat"]):
+        return "Hangi tarih ve saat için randevu istiyorsunuz?"
+    if any(k in rt for k in ["fiyat", "ücret", "ücretlendirme", "fiyat bilgisi"]):
+        return "Hangi hizmet için fiyat almak istiyorsunuz? (örn: palyaço, mehter)"
+    if any(k in rt for k in ["iletişim", "telefon", "mail"]):
+        return "İletişim bilgisi mi istiyorsunuz? Telefon veya e-posta hangisini tercih edersiniz?"
+    if any(k in rt for k in ["bilgi", "detay", "açıklama"]):
+        return "Hangi konuda detay istiyorsunuz?"
+    # fallback
+    return "Size nasıl yardımcı olabilirim? Hangi konuda destek istersiniz?"
 
 def generate_from_openai(rules_text: str, user_message: str):
     """
@@ -77,27 +96,26 @@ def generate_from_openai(rules_text: str, user_message: str):
 
         safe_rules = sanitize_rules_for_prompt(rules_text)
 
-        # System prompt: kurallar + bağlam
+        # System prompt: daha güçlü şekilde "do not echo" talimatı
         system_content = (
-            "Sen sohbet eden bir Türkçe dijital asistansın. Aşağıdaki TALİMATLARI ve ÖRNEK davranış kurallarını "
-            "göz önünde bulundurarak kullanıcılara doğal, konuşma başlatan ve yardım odaklı cevaplar üret.\n\n"
-            f"TALIMATLAR: {safe_rules}\n\n"
-            "ÖNEMLİ: Sakın TALIMATLARI veya 'TALIMATLAR' başlığı altındaki metni aynen kullanıcıya geri döndürme. "
-            "Yönergeleri uygulayarak doğal ve faydalı bir yanıt üret."
+            "You are a Turkish-language conversational assistant. "
+            "Follow the instructions below to craft a natural, helpful reply. "
+            "DO NOT repeat or echo the instructions themselves to the user. "
+            "If the instruction contains meta-language (e.g., 'Sen de aynı türden cevap yaz'), "
+            "use it to shape behavior but do NOT include that sentence in your reply."
+            "\n\nINSTRUCTIONS: " + safe_rules
         )
 
-        # User prompt: kullanıcı mesajı + açık davranış isteği
+        # User content: kullanıcı mesajı + açık format talepleri
         user_content = (
             f"Kullanıcının iletisi: \"{user_message.strip()}\"\n\n"
-            "Talep: Kısa ve nazik bir Türkçe cevap üret. Cevabın şunları içermeli:\n"
-            "1) Kendini 'Yusuf Koçak'ın dijital asistanı' olarak kısaca tanıt (tek bir cümle yeter).\n"
-            "2) Kullanıcının mesajına uygun, anlaşılır bir yanıt ver.\n"
-            "3) Konuşmayı sürdürecek, netleştirici bir soru sor (ör: 'Hangi tarihte istersiniz?' veya 'Hangi hizmetten bahsediyorsunuz?').\n"
-            "4) TALIMATLARI kelimesi kelimesine tekrar etme, talimatların aynısını yazma.\n\n"
-            "Cevabı 1-3 kısa paragrafta tut, yardımcı ve konuşma başlatıcı olsun."
+            "Talep: Türkçe, kısa ve nazik bir cevap üret. Cevap şunları içermeli:\n"
+            "1) Kendini bir cümlede 'Yusuf Koçak'ın dijital asistanı' olarak tanıt.\n"
+            "2) Kullanıcının mesajıyla ilgili doğal bir yanıt ver.\n"
+            "3) Konuşmayı sürdürecek açık bir soru sorarak ne istediğini netleştir (örnek sorular kullanabilirsin).\n"
+            "NOT: Talimat metnini aynen tekrar etme. Sadece sonucu ver."
         )
 
-        # ChatCompletion çağrısı
         resp = openai.ChatCompletion.create(
             model=OPENAI_MODEL,
             messages=[
@@ -114,22 +132,31 @@ def generate_from_openai(rules_text: str, user_message: str):
             return None
 
         choice0 = resp.choices[0]
-        # some SDKs return .message.content, some return .text — güvenli çekiş:
         content = None
         if getattr(choice0, "message", None):
             content = choice0.message.get("content")
         elif getattr(choice0, "text", None):
             content = choice0.text
-        # Temizle
-        if content:
-            content = content.strip()
-            # Basit güvenlik: eğer model tam olarak rules_text'u döndürdüyse fallback yap
-            if safe_rules and content == safe_rules:
-                logger.info("OpenAI rules'u aynen döndürdü — fallback uygulanacak.")
-                return None
-            return content
-        return None
 
+        if not content:
+            return None
+
+        content = content.strip()
+
+        # Kontrol: model rules'u direkt ya da çok benzer şekilde döndürdü mü?
+        sim = similarity(content, safe_rules)
+        logger.info("OpenAI returned content similarity to rules: %.3f", sim)
+        if sim >= ECHO_SIMILARITY_THRESHOLD or safe_rules in content:
+            logger.info("Detected likely echoing of rules (sim >= %.3f). Returning None to trigger fallback.", ECHO_SIMILARITY_THRESHOLD)
+            return None
+
+        # Ayrıca, eğer cevap açıkça talimat içeriğini tekrarlıyorsa (örn 'Sen de aynı türden cevap yaz...'), reddet
+        lowerc = content.lower()
+        if "sen de aynı türden" in lowerc or "talimat" in lowerc or "yönerge" in lowerc:
+            logger.info("Detected forbidden phrase in response; treating as echo.")
+            return None
+
+        return content
     except Exception as e:
         logger.exception("OpenAI çağrısı sırasında hata: %s", e)
         return None
@@ -140,7 +167,7 @@ def webhook():
     if not incoming:
         return ("", 204)
 
-    logger.info("Gelen mesaj: %s", incoming)
+    logger.info("Gelen mesaj: %s", incoming[:1000])
 
     try:
         df = load_prompts(CSV_PATH)
@@ -151,22 +178,19 @@ def webhook():
         return str(resp)
 
     matched_rule = find_rule_for_text(incoming, df)
-
     reply = None
 
     if matched_rule:
         logger.info("Eşleşen rule bulundu. OpenAI ile cevap üretmeye çalışılıyor.")
         ai_reply = generate_from_openai(matched_rule, incoming)
         if ai_reply:
+            logger.info("OpenAI cevabı kullanılıyor.")
             reply = ai_reply
         else:
-            # fallback: rules'i doğrudan göndermek yerine düzenleyip, kendini tanıtıp soru soran bir metin oluştur
-            # böylece Twilio'ya direktif gibi görünen bir text gitmez
-            sanitized = sanitize_rules_for_prompt(matched_rule)
-            reply = (
-                f"Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. {sanitized} "
-                "Size nasıl yardımcı olabilirim? Lütfen ne istediğinizi kısaca belirtin."
-            )
+            # fallback: doğrudan talimatı tekrar etmeyecek şekilde cevap hazırla
+            logger.info("OpenAI yok veya echo tespit edildi. Fallback uygulanıyor.")
+            question = pick_followup_question_from_rules(matched_rule)
+            reply = f"Merhaba — ben Yusuf Koçak'ın dijital asistanıyım. {question}"
     else:
         logger.info("Herhangi bir rule eşleşmedi. OpenAI fallback deneniyor.")
         ai_reply = generate_from_openai(
@@ -184,7 +208,7 @@ def webhook():
 
     resp = MessagingResponse()
     resp.message(reply)
-    logger.info("Gönderilen cevap: %s", reply)
+    logger.info("Gönderilen cevap (ilk 300 char): %s", reply[:300])
     return str(resp)
 
 @app.route("/", methods=["GET"])
