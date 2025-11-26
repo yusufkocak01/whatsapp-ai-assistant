@@ -1,13 +1,12 @@
-from flask import Flask, request, Response
+from flask import Flask, request
 import os
 import requests
-from twilio.twiml.messaging_response import MessagingResponse
 
 app = Flask(__name__)
 
-# Gemini API Key ve endpoint (Railway Environment Variables)
+# Gemini API key (Railway environment variable olarak ekleyin)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_ENDPOINT = os.getenv("GEMINI_ENDPOINT", "https://api.gemini.com/v1/chat/completions")
+GEMINI_URL = "https://api.generativeai.google/v1beta2/models/text-bison-001:generateMessage"
 
 # Tüm linkler
 with open("links.txt", "r", encoding="utf-8") as f:
@@ -16,26 +15,29 @@ with open("links.txt", "r", encoding="utf-8") as f:
 # Desteklenen şehirler
 CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-# Hafızada session
+# Hafızada session (demo)
 sessions = {}
 
 def find_matches(filters):
     matches = []
-    city = filters.get("city", "").lower()
-    district = filters.get("district", "").lower()
+    city = filters.get("city", "").lower() if filters.get("city") else ""
+    district = filters.get("district", "").lower() if filters.get("district") else ""
     service = filters.get("service_type")
     detail = filters.get("detail")
 
     for url in ALL_URLS:
         u = url.lower()
+
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
+
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
             if district not in parts[1].lower():
                 continue
+
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -46,96 +48,117 @@ def find_matches(filters):
             continue
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
-        if service == "mehter" and detail and f"-{detail}." not in u:
-            continue
-        if service == "palyaco" and detail:
+
+        if service == "mehter" and detail:
+            if f"-{detail}." not in u:
+                continue
+        if service == "palyaco":
             if detail == "2-saat" and "2-saat" not in u:
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
                 continue
+
         matches.append(url)
+
     return matches[:3]
+
+def ask_gemini(prompt):
+    headers = {
+        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "prompt": prompt,
+        "temperature": 0.6,
+        "candidate_count": 1
+    }
+    response = requests.post(GEMINI_URL, headers=headers, json=data)
+    response.raise_for_status()
+    result = response.json()
+    # Bison API yanıt formatına göre text çıkarıyoruz
+    return result.get("candidates", [{}])[0].get("content", "")
 
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     from_number = request.values.get("From")
-    body = request.values.get("Body", "").strip().lower()
+    body = request.values.get("Body", "").strip()
 
-    if not from_number or not body:
+    if not from_number:
         return "OK", 200
 
     if from_number not in sessions:
-        sessions[from_number] = {"messages": [], "filters": {}}
+        sessions[from_number] = {
+            "messages": [],
+            "filters": {}
+        }
 
     session = sessions[from_number]
     session["messages"].append({"role": "user", "content": body})
-    filters = session["filters"]
 
-    # Şehir tespiti
-    for city in CITIES:
-        if city.lower() in body:
-            filters["city"] = city
+    # Prompt oluşturuyoruz
+    system_prompt = (
+        "Sen, İsra Organizasyon’un samimi WhatsApp asistanısın. "
+        "Müşteriden doğal sorularla şunları öğren: il, ilçe, hizmet türü (mehter, palyaço, dini düğün/sunnet, bando, karagöz), "
+        "ve gerekirse detay (örneğin: mehter için kişi sayısı, palyaço için 2 saat mi tüm gün mü). "
+        "Yanıtlar kısa, samimi ve Türkçe olmalı. Sadece tam bilgi olduğunda uygun link(leri) öner. "
+        "Tahminle asla link önerme."
+    )
+    full_prompt = system_prompt + "\n\n" + "\n".join([m["content"] for m in session["messages"] if m["role"]=="user"])
 
-    # İlçe tespiti
-    known_districts = {url.split("/")[3].split("-")[1] for url in ALL_URLS if len(url.split("/")) > 3}
-    for d in known_districts:
-        if d.lower() in body:
-            filters["district"] = d
-
-    # Hizmet türü
-    if "mehter" in body:
-        filters["service_type"] = "mehter"
-    elif "palyaço" in body or "palyaco" in body:
-        filters["service_type"] = "palyaco"
-    elif "dini düğün" in body or "sunnet" in body or "düğün" in body or "nikah" in body:
-        filters["service_type"] = "sunnet_dugunu"
-    elif "bando" in body:
-        filters["service_type"] = "bando"
-    elif "karagöz" in body or "gölge" in body or "hacivat" in body:
-        filters["service_type"] = "karagoz"
-
-    # Detay tespiti
-    if filters.get("service_type") == "mehter":
-        for size in ["8", "12", "18", "24", "30", "32"]:
-            if size in body:
-                filters["detail"] = size
-                break
-    if filters.get("service_type") == "palyaco":
-        if "2 saat" in body or "2-saat" in body:
-            filters["detail"] = "2-saat"
-        elif "tüm gün" in body or "tum gun" in body:
-            filters["detail"] = "tum-gun"
-
-    # Gemini API çağrısı
-    headers = {"Authorization": f"Bearer {GEMINI_API_KEY}", "Content-Type": "application/json"}
     try:
-        data = {
-            "model": "gemini-1.5",
-            "messages": session["messages"],
-            "temperature": 0.6,
-            "max_tokens": 250
-        }
-        r = requests.post(GEMINI_ENDPOINT, headers=headers, json=data, timeout=10)
-        r.raise_for_status()
-        result = r.json()
-        ai_reply = result.get("choices", [{}])[0].get("message", {}).get("content", "Cevap alınamadı.")
+        ai_reply = ask_gemini(full_prompt).strip()
     except Exception as e:
-        ai_reply = f"Hata Gemini API: {str(e)}"
-
-    # Eğer bilgiler tamamsa link öner
-    if filters.get("city") and filters.get("district") and filters.get("service_type") and \
-       (filters["service_type"] not in ["mehter", "palyaco"] or filters.get("detail")):
-        matches = find_matches(filters)
-        if matches:
-            ai_reply += "\n\nİşte uygun paketler:\n" + "\n".join(matches)
+        ai_reply = f"Hata: {str(e)}"
 
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
-    # Twilio cevabı
-    resp = MessagingResponse()
-    resp.message(ai_reply)
-    return Response(str(resp), mimetype="application/xml")
+    text = body.lower()
+    filters = session["filters"]
 
+    for city in CITIES:
+        if city.lower() in text:
+            filters["city"] = city
+
+    known_districts = {url.split("/")[3].split("-")[1] for url in ALL_URLS if len(url.split("/")) > 3}
+    for d in known_districts:
+        if d.lower() in text:
+            filters["district"] = d
+
+    if "mehter" in text:
+        filters["service_type"] = "mehter"
+    elif "palyaço" in text or "palyaco" in text:
+        filters["service_type"] = "palyaco"
+    elif "dini düğün" in text or "nikah" in text or "sunnet" in text or "düğün" in text:
+        filters["service_type"] = "sunnet_dugunu"
+    elif "bando" in text:
+        filters["service_type"] = "bando"
+    elif "karagöz" in text or "gölge" in text or "hacivat" in text:
+        filters["service_type"] = "karagoz"
+
+    if filters.get("service_type") == "mehter":
+        for size in ["8", "12", "18", "24", "30", "32"]:
+            if size in text:
+                filters["detail"] = size
+                break
+
+    if filters.get("service_type") == "palyaco":
+        if "2 saat" in text or "2-saat" in text:
+            filters["detail"] = "2-saat"
+        elif "tüm gün" in text or "tum gun" in text:
+            filters["detail"] = "tum-gun"
+
+    if (
+        filters.get("city") and
+        filters.get("district") and
+        filters.get("service_type") and
+        (filters["service_type"] not in ["mehter", "palyaco"] or filters.get("detail"))
+    ):
+        matches = find_matches(filters)
+        if matches and "http" not in ai_reply:
+            ai_reply += "\n\nİşte size uygun paketler:\n" + "\n".join(matches)
+            ai_reply += "\n\nİnceleyin, detay isterseniz yardımcı olabilirim! 😊"
+
+    return ai_reply, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
