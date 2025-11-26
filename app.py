@@ -16,32 +16,12 @@ CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "
 # Oturum saklama (üretimde Redis önerilir)
 sessions = {}
 
-def extract_city_and_district(text):
-    """Metinden il ve ilçe çıkarır."""
-    city = None
-    district = None
-    text_lower = text.lower()
-
-    for c in CITIES:
-        if c.lower() in text_lower:
-            city = c
-            break
-
-    if city:
-        # İlçe genelde il adından sonra gelir: "adana karataş" → ilçe: karataş
-        # Ancak biz URL yapısına göre ilçeyi doğrudan alacağız
-        # Burada sadece il alınıyor, ilçe OpenAI aracılığıyla kullanıcıdan istenir
-        pass
-
-    return city
-
 def find_matching_urls(filters):
-    """Verilen filtrelere göre eşleşen URL'leri döner."""
     matches = []
     city = filters.get("city", "").lower() if filters.get("city") else ""
     district = filters.get("district", "").lower() if filters.get("district") else ""
     service = filters.get("service_type")
-    detail = filters.get("detail")  # mehter için kişi sayısı, palyaço için "2-saat" veya "tum-gun"
+    detail = filters.get("detail")
 
     for url in ALL_URLS:
         url_lower = url.lower()
@@ -50,12 +30,11 @@ def find_matching_urls(filters):
         if city and not url_lower.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
 
-        # İlçe kontrolü (ikinci segment)
+        # İlçe kontrolü
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
-            # İlçe adı URL'de ikinci parça
             url_district = parts[1].lower()
             if district not in url_district and url_district not in district:
                 continue
@@ -84,9 +63,9 @@ def find_matching_urls(filters):
 
         matches.append(url)
 
-    return matches[:3]  # En fazla 3 öneri
+    return matches[:3]
 
-@app.route("/whatsapp", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     from_number = request.values.get("From")
     incoming_msg = request.values.get("Body", "").strip()
@@ -94,7 +73,6 @@ def whatsapp_webhook():
     if not from_number:
         return "OK", 200
 
-    # Oturum başlat
     if from_number not in sessions:
         sessions[from_number] = {
             "messages": [
@@ -119,7 +97,6 @@ def whatsapp_webhook():
     session = sessions[from_number]
     session["messages"].append({"role": "user", "content": incoming_msg})
 
-    # OpenAI ile yanıt oluştur
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -129,20 +106,20 @@ def whatsapp_webhook():
         )
         ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
-        ai_reply = "Anlaşılmadı. Lütfen tekrar yazar mısınız?"
+        ai_reply = "Anlamsız bir hata oluştu. Lütfen tekrar yazın."
 
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
-    # Basit filtreleme: metinden bilgi çıkar
+    # Basit metin analiziyle filtreleme
     text = incoming_msg.lower()
     filters = session["filters"]
 
-    # İl
     for city in CITIES:
         if city.lower() in text:
             filters["city"] = city
 
-    # İlçe (basit eşleşme)
+    # İlçe adları URL’lerden çıkarılabilir, ancak burada sadece bazıları elle eşleştirildi
+    # Daha gelişmiş sistem için ilçe listesi de çıkarılabilir
     possible_districts = set()
     for url in ALL_URLS:
         parts = url.replace("https://israorganizasyon.com/", "").split("-")
@@ -152,7 +129,6 @@ def whatsapp_webhook():
         if dist in text:
             filters["district"] = dist.title()
 
-    # Hizmet türü
     if "mehter" in text:
         filters["service_type"] = "mehter"
     elif "palyaço" in text or "palyaco" in text:
@@ -164,7 +140,6 @@ def whatsapp_webhook():
     elif "karagöz" in text or "gölge" in text or "hacivat" in text:
         filters["service_type"] = "karagoz"
 
-    # Detaylar
     if filters.get("service_type") == "mehter":
         if "8" in text: filters["detail"] = "8"
         elif "12" in text: filters["detail"] = "12"
@@ -179,7 +154,7 @@ def whatsapp_webhook():
         elif "tüm gün" in text or "tum gun" in text:
             filters["detail"] = "tum-gun"
 
-    # Link önerme koşulu
+    # Link önerme
     if (
         filters.get("city") and
         filters.get("district") and
@@ -193,7 +168,10 @@ def whatsapp_webhook():
         if matching_links and "http" not in ai_reply:
             ai_reply += "\n\nİşte size uygun paketler:\n" + "\n".join(matching_links)
             ai_reply += "\n\nİnceleyin, beğendiğiniz varsa detay verebilirim! 😊"
-            # İleri soruları önlemek için oturumu temizlemeyebilirsiniz,
-            # ama tekrar öneri istenirse kullanıcı “tekrar” diyebilir.
 
     return ai_reply, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+# Railway portunu kullan, yoksa 8080
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
