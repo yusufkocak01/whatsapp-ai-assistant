@@ -1,155 +1,199 @@
-#!/usr/bin/env python3
+from flask import Flask, request
+import os
+import re
+from openai import OpenAI
 
-# app.py
+app = Flask(__name__)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-"""
-WhatsApp dijital asistan webhooku (Twilio uyumlu).
+# Ham link listesi
+with open("links.txt", "r", encoding="utf-8") as f:
+    ALL_URLS = [line.strip() for line in f if line.strip()]
 
-* prompt.csv sadece 'rules' sütunu içerir
-* Her 'rules' satırı, botun mesajlara nasıl cevap vereceğini belirten bir prompt/metindir
-* Gelen mesaj, satırların tümü ile test edilip OpenAI’ye gönderilir
-* BOT ON / BOT OFF (admin numara) handoff desteği
-  """
-  import os
-  import time
-  import logging
-  import csv
-  from typing import Dict, List
+# Desteklenen iller
+CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-from flask import Flask, request, Response
-from twilio.twiml.messaging_response import MessagingResponse
-import openai
+# Oturum saklama (üretimde Redis önerilir)
+sessions = {}
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("whatsapp-assistant")
+def extract_city_and_district(text):
+    """Metinden il ve ilçe çıkarır."""
+    city = None
+    district = None
+    text_lower = text.lower()
 
-CSV_PATH = os.environ.get("PROMPT_CSV", "prompt.csv")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "300"))
-TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0.45"))
+    for c in CITIES:
+        if c.lower() in text_lower:
+            city = c
+            break
 
-_default_admins = "whatsapp:+905322034617"
-ADMIN_NUMBERS = set(
-n.strip() for n in os.environ.get("ADMIN_NUMBERS", _default_admins).split(",") if n.strip()
-)
+    if city:
+        # İlçe genelde il adından sonra gelir: "adana karataş" → ilçe: karataş
+        # Ancak biz URL yapısına göre ilçeyi doğrudan alacağız
+        # Burada sadece il alınıyor, ilçe OpenAI aracılığıyla kullanıcıdan istenir
+        pass
 
-HANDOFF_TTL = int(os.environ.get("HANDOFF_TTL_SECONDS", str(60 * 60)))
-HANDOFF_STATE: Dict[str, dict] = {}
+    return city
 
-app = Flask(**name**)
+def find_matching_urls(filters):
+    """Verilen filtrelere göre eşleşen URL'leri döner."""
+    matches = []
+    city = filters.get("city", "").lower() if filters.get("city") else ""
+    district = filters.get("district", "").lower() if filters.get("district") else ""
+    service = filters.get("service_type")
+    detail = filters.get("detail")  # mehter için kişi sayısı, palyaço için "2-saat" veya "tum-gun"
 
-# ---------- Helper ----------
+    for url in ALL_URLS:
+        url_lower = url.lower()
 
-def load_rules(csv_path: str) -> List[str]:
-"""prompt.csv dosyasını 'rules' sütunundan okur."""
-try:
-with open(csv_path, "r", encoding="utf-8") as f:
-reader = csv.DictReader(f)
-if "rules" not in reader.fieldnames:
-raise ValueError("CSV dosyasında 'rules' sütunu bulunmalı.")
-return [row["rules"].strip() for row in reader if row.get("rules", "").strip()]
-except FileNotFoundError:
-logger.warning("prompt.csv bulunamadı: %s", csv_path)
-return []
-except Exception as e:
-logger.error("CSV okuma hatası: %s", e)
-return []
+        # İl kontrolü
+        if city and not url_lower.startswith(f"https://israorganizasyon.com/{city.lower()}"):
+            continue
 
-def is_admin(sender: str) -> bool:
-return sender in ADMIN_NUMBERS
+        # İlçe kontrolü (ikinci segment)
+        if district:
+            parts = url.replace("https://israorganizasyon.com/", "").split("-")
+            if len(parts) < 2:
+                continue
+            # İlçe adı URL'de ikinci parça
+            url_district = parts[1].lower()
+            if district not in url_district and url_district not in district:
+                continue
 
-def set_handoff(sender: str, by: str = "admin"):
-HANDOFF_STATE[sender] = {"handed_off": True, "by": by, "since": time.time()}
+        # Hizmet türü
+        if service == "mehter" and "mehter" not in url_lower:
+            continue
+        if service == "palyaco" and "palyaco" not in url_lower:
+            continue
+        if service in ["sunnet_dugunu", "dini_dugun"] and not ("sunnet" in url_lower or "dugunu" in url_lower):
+            continue
+        if service == "bando" and "bando" not in url_lower:
+            continue
+        if service == "karagoz" and ("karagoz" not in url_lower and "golge" not in url_lower):
+            continue
 
-def clear_handoff(sender: str):
-HANDOFF_STATE.pop(sender, None)
+        # Detay kontrolü
+        if service == "mehter" and detail:
+            if f"-{detail}." not in url_lower:
+                continue
+        if service == "palyaco" and detail:
+            if detail == "2-saat" and "2-saat" not in url_lower:
+                continue
+            if detail == "tum-gun" and "tum-gun" not in url_lower:
+                continue
 
-def check_handoff_active(sender: str) -> bool:
-state = HANDOFF_STATE.get(sender)
-if not state:
-return False
-if HANDOFF_TTL and time.time() - state.get("since", 0) > HANDOFF_TTL:
-HANDOFF_STATE.pop(sender, None)
-return False
-return True
+        matches.append(url)
 
-# ---------- OpenAI ----------
+    return matches[:3]  # En fazla 3 öneri
 
-openai.api_key = OPENAI_API_KEY
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    from_number = request.values.get("From")
+    incoming_msg = request.values.get("Body", "").strip()
 
-def generate_reply(rules_list: List[str], user_message: str) -> str:
-if not OPENAI_API_KEY:
-return "Mesajınızı aldım, ancak bot AI desteği şu anda yok."
+    if not from_number:
+        return "OK", 200
 
-```
-combined_rules = "\n".join(rules_list)
+    # Oturum başlat
+    if from_number not in sessions:
+        sessions[from_number] = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Sen, İsra Organizasyon’un samimi ve profesyonel WhatsApp asistanısın. "
+                        "Görevin: müşteriden sırayla şunları doğal bir şekilde öğrenmek:\n"
+                        "1. Hangi ilde olduğunu,\n"
+                        "2. Hangi ilçede hizmet istediğini,\n"
+                        "3. Hangi hizmet türünü (örneğin: mehter, palyaço, dini düğün/sunnet, bando, karagöz),\n"
+                        "4. Gerekirse detay: mehter için kaç kişilik, palyaço için 2 saat mi tüm gün mü?\n"
+                        "Yanıtlar kısa, doğal, Türkçe ve her zaman samimi olmalı. "
+                        "Link önerdiğinde sadece URL'leri yaz, açıklamayı önceki cümlede ver. "
+                        "Asla tahminle link önerme. Sadece kesin bilgi olduğunda öner."
+                    )
+                }
+            ],
+            "filters": {}
+        }
 
-prompt = (
-    f"Rules metni:\n{combined_rules}\n\n"
-    f"Kullanıcının mesajı: {user_message}\n\n"
-    "Kuralları uygulayarak, kısa, samimi ve anlaşılır bir Türkçe cevap verin. "
-    "Kendinizi 'Yusuf Koçak'ın dijital asistanı' olarak tanıtın ve cevabı bir soru ile bitirerek konuşmayı devam ettirin."
-)
+    session = sessions[from_number]
+    session["messages"].append({"role": "user", "content": incoming_msg})
 
-try:
-    resp = openai.ChatCompletion.create(
-        model=OPENAI_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=MAX_TOKENS,
-        temperature=TEMPERATURE,
-    )
-    content = resp.choices[0].message.get("content", "").strip() if resp.choices else None
-    return content or "Mesajınızı aldım, ancak cevap üretilemedi."
-except Exception as e:
-    logger.exception("OpenAI cevap üretme hatası: %s", e)
-    return "Mesajınızı aldım ama şu anda bir sorun oluştu."
-```
+    # OpenAI ile yanıt oluştur
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=session["messages"],
+            temperature=0.6,
+            max_tokens=250
+        )
+        ai_reply = response.choices[0].message.content.strip()
+    except Exception as e:
+        ai_reply = "Anlaşılmadı. Lütfen tekrar yazar mısınız?"
 
-# ---------- Routes ----------
+    session["messages"].append({"role": "assistant", "content": ai_reply})
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-incoming = (request.values.get("Body") or "").strip()
-sender = (request.values.get("From") or "").strip()
+    # Basit filtreleme: metinden bilgi çıkar
+    text = incoming_msg.lower()
+    filters = session["filters"]
 
-```
-if not incoming or not sender:
-    return ("", 204)
+    # İl
+    for city in CITIES:
+        if city.lower() in text:
+            filters["city"] = city
 
-logger.info("Gelen mesaj (sender=%s): %s", sender, incoming[:500])
+    # İlçe (basit eşleşme)
+    possible_districts = set()
+    for url in ALL_URLS:
+        parts = url.replace("https://israorganizasyon.com/", "").split("-")
+        if len(parts) >= 2:
+            possible_districts.add(parts[1].lower())
+    for dist in possible_districts:
+        if dist in text:
+            filters["district"] = dist.title()
 
-rules_list = load_rules(CSV_PATH)
-if not rules_list:
-    resp = MessagingResponse()
-    resp.message("Sunucuda prompt verisi yüklenemedi. Lütfen admin ile iletişime geçin.")
-    return str(resp)
+    # Hizmet türü
+    if "mehter" in text:
+        filters["service_type"] = "mehter"
+    elif "palyaço" in text or "palyaco" in text:
+        filters["service_type"] = "palyaco"
+    elif "dini düğün" in text or "nikah" in text or "sunnet" in text or "düğün" in text:
+        filters["service_type"] = "sunnet_dugunu"
+    elif "bando" in text:
+        filters["service_type"] = "bando"
+    elif "karagöz" in text or "gölge" in text or "hacivat" in text:
+        filters["service_type"] = "karagoz"
 
-cmd = incoming.lower()
-if is_admin(sender):
-    resp = MessagingResponse()
-    if cmd in ("bot off", "stop bot", "bot kapat", "bot:off"):
-        set_handoff(sender)
-        resp.message("Bot devre dışı bırakıldı.")
-        return str(resp)
-    if cmd in ("bot on", "start bot", "bot aç", "bot:on"):
-        clear_handoff(sender)
-        resp.message("Bot tekrar aktif edildi.")
-        return str(resp)
+    # Detaylar
+    if filters.get("service_type") == "mehter":
+        if "8" in text: filters["detail"] = "8"
+        elif "12" in text: filters["detail"] = "12"
+        elif "18" in text: filters["detail"] = "18"
+        elif "24" in text: filters["detail"] = "24"
+        elif "30" in text: filters["detail"] = "30"
+        elif "32" in text: filters["detail"] = "32"
 
-if check_handoff_active(sender):
-    return ("", 204)
+    if filters.get("service_type") == "palyaco":
+        if "2 saat" in text or "2-saat" in text:
+            filters["detail"] = "2-saat"
+        elif "tüm gün" in text or "tum gun" in text:
+            filters["detail"] = "tum-gun"
 
-reply = generate_reply(rules_list, incoming)
-resp = MessagingResponse()
-resp.message(reply)
-return str(resp)
-```
+    # Link önerme koşulu
+    if (
+        filters.get("city") and
+        filters.get("district") and
+        filters.get("service_type") and
+        (
+            filters["service_type"] not in ["mehter", "palyaco"] or
+            filters.get("detail")
+        )
+    ):
+        matching_links = find_matching_urls(filters)
+        if matching_links and "http" not in ai_reply:
+            ai_reply += "\n\nİşte size uygun paketler:\n" + "\n".join(matching_links)
+            ai_reply += "\n\nİnceleyin, beğendiğiniz varsa detay verebilirim! 😊"
+            # İleri soruları önlemek için oturumu temizlemeyebilirsiniz,
+            # ama tekrar öneri istenirse kullanıcı “tekrar” diyebilir.
 
-@app.route("/", methods=["GET"])
-def index():
-return "WhatsApp Dijital Asistan webhooku çalışıyor."
-
-if **name** == "**main**":
-port = int(os.environ.get("PORT", 8080))
-app.run(host="0.0.0.0", port=port)
+    return ai_reply, 200, {"Content-Type": "text/plain; charset=utf-8"}
