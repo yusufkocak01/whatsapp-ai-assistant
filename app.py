@@ -13,7 +13,7 @@ with open("links.txt", "r", encoding="utf-8") as f:
 # Supported cities
 CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-# In-memory sessions (use Redis in production)
+# In-memory sessions (for demo)
 sessions = {}
 
 def find_matches(filters):
@@ -21,16 +21,14 @@ def find_matches(filters):
     city = filters.get("city", "").lower() if filters.get("city") else ""
     district = filters.get("district", "").lower() if filters.get("district") else ""
     service = filters.get("service_type")
-    detail = filters.get("detail")  # mehter size or palyaco duration
+    detail = filters.get("detail")
 
     for url in ALL_URLS:
         u = url.lower()
 
-        # City filter
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
 
-        # District filter
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
@@ -38,7 +36,6 @@ def find_matches(filters):
             if district not in parts[1].lower():
                 continue
 
-        # Service type
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -50,11 +47,10 @@ def find_matches(filters):
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
 
-        # Detail filter
         if service == "mehter" and detail:
             if f"-{detail}." not in u:
                 continue
-        if service == "palyaco" and detail:
+        if service == "palyaco":
             if detail == "2-saat" and "2-saat" not in u:
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
@@ -79,13 +75,10 @@ def whatsapp_webhook():
                     "role": "system",
                     "content": (
                         "Sen, İsra Organizasyon’un samimi WhatsApp asistanısın. "
-                        "Müşteriden doğal sorularla şunları öğren:\n"
-                        "1. İl (Adana, Niğde, vs.)\n"
-                        "2. İlçe\n"
-                        "3. Hizmet (mehter, palyaço, dini düğün/sunnet, bando, karagöz)\n"
-                        "4. Detay (mehter: kişi sayısı; palyaço: 2 saat veya tüm gün)\n"
-                        "Sadece tam bilgi olduğunda uygun link(leri) öner. "
-                        "Yanıtlar kısa, Türkçe ve samimi olsun. Tahminle link önerme."
+                        "Müşteriden doğal sorularla şunları öğren: il, ilçe, hizmet türü (mehter, palyaço, dini düğün/sunnet, bando, karagöz), "
+                        "ve gerekirse detay (örneğin: mehter için kişi sayısı, palyaço için 2 saat mi tüm gün mü). "
+                        "Yanıtlar kısa, samimi ve Türkçe olmalı. Sadece tam bilgi olduğunda uygun link(leri) öner. "
+                        "Tahminle asla link önerme."
                     )
                 }
             ],
@@ -97,19 +90,17 @@ def whatsapp_webhook():
 
     try:
         response = client.chat.completions.create(
-    model="gpt-3.5-turbo",  # Garanti altındadır
-    messages=session["messages"],
-    temperature=0.6,
-    max_tokens=250
-)
+            model="gpt-4o-mini",
+            messages=session["messages"],
+            temperature=0.6,
+            max_tokens=250
         )
         ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
-        ai_reply = "Anlaşılmadı. Lütfen tekrar yazar mısınız?"
+        ai_reply = f"Hata: {str(e)}"  # Geçici olarak hatayı göster
 
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
-    # Extract info from user message
     text = body.lower()
     filters = session["filters"]
 
@@ -117,7 +108,6 @@ def whatsapp_webhook():
         if city.lower() in text:
             filters["city"] = city
 
-    # Extract district from known list
     known_districts = {url.split("/")[3].split("-")[1] for url in ALL_URLS if len(url.split("/")) > 3}
     for d in known_districts:
         if d.lower() in text:
@@ -146,7 +136,6 @@ def whatsapp_webhook():
         elif "tüm gün" in text or "tum gun" in text:
             filters["detail"] = "tum-gun"
 
-    # Suggest links only when all needed info is present
     if (
         filters.get("city") and
         filters.get("district") and
@@ -160,8 +149,6 @@ def whatsapp_webhook():
 
     return ai_reply, 200, {"Content-Type": "text/plain; charset=utf-8"}
 
-# Run on Railway-compatible port
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-
