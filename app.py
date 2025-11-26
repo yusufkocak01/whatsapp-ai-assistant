@@ -1,23 +1,40 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import os
 import requests
+from dotenv import load_dotenv
+
+# Lokal test için .env dosyasını yükle
+load_dotenv()
 
 app = Flask(__name__)
 
-# Gemini API key Railway'den Environment Variable olarak al
+# Gemini API Key
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_KEY:
-    print("GEMINI_API_KEY environment variable yok!")
+    print("Uyarı: GEMINI_API_KEY bulunamadı!")
 
 # Tüm linkler
 with open("links.txt", "r", encoding="utf-8") as f:
     ALL_URLS = [line.strip() for line in f if line.strip()]
 
-# Desteklenen şehirler
-CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
+CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay",
+          "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-# Hafızada session (demo)
 sessions = {}
+
+def ask_gemini(prompt):
+    url = "https://generativelanguage.googleapis.com/v1beta2/models/text-bison-001:generateMessage"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "prompt": {"text": prompt},
+        "temperature": 0.6,
+        "candidate_count": 1
+    }
+    params = {"key": GEMINI_KEY}
+    resp = requests.post(url, headers=headers, json=payload, params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["candidates"][0]["content"]["text"]
 
 def find_matches(filters):
     matches = []
@@ -28,14 +45,17 @@ def find_matches(filters):
 
     for url in ALL_URLS:
         u = url.lower()
+
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
+
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
             if district not in parts[1].lower():
                 continue
+
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -46,6 +66,7 @@ def find_matches(filters):
             continue
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
+
         if service == "mehter" and detail:
             if f"-{detail}." not in u:
                 continue
@@ -54,34 +75,10 @@ def find_matches(filters):
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
                 continue
-        matches.append(url)
-    return matches[:3]
 
-def ask_gemini(prompt_text):
-    url = "https://generativelanguage.googleapis.com/v1beta2/models/text-bison-001:generateMessage"
-    headers = {
-        "Authorization": f"Bearer {GEMINI_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "prompt": {
-            "text": prompt_text
-        },
-        "temperature": 0.6,
-        "candidate_count": 1
-    }
-    # İlk olarak Authorization Bearer ile deneyelim
-    resp = requests.post(url, headers=headers, json=data)
-    if resp.status_code == 401:
-        # 401 ise query param ile deneyelim
-        url_with_key = f"{url}?key={GEMINI_KEY}"
-        resp = requests.post(url_with_key, json=data)
-    resp.raise_for_status()
-    result = resp.json()
-    try:
-        return result["candidates"][0]["content"]["text"]
-    except:
-        return "Gemini yanıtı alınamadı."
+        matches.append(url)
+
+    return matches[:3]
 
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
@@ -92,17 +89,25 @@ def whatsapp_webhook():
         return "OK", 200
 
     if from_number not in sessions:
-        sessions[from_number] = {"messages": [], "filters": {}}
+        sessions[from_number] = {
+            "messages": [{"role": "user", "content": ""}],
+            "filters": {}
+        }
 
     session = sessions[from_number]
+    session["messages"].append({"role": "user", "content": body})
 
-    # Mesajı Gemini'ye sor
-    ai_reply = ask_gemini(body)
+    try:
+        ai_reply = ask_gemini(body)
+    except Exception as e:
+        ai_reply = f"Hata: {str(e)}"
 
+    session["messages"].append({"role": "assistant", "content": ai_reply})
+
+    # Filtreleme
     text = body.lower()
     filters = session["filters"]
 
-    # Şehir filtreleme
     for city in CITIES:
         if city.lower() in text:
             filters["city"] = city
@@ -112,7 +117,6 @@ def whatsapp_webhook():
         if d.lower() in text:
             filters["district"] = d
 
-    # Hizmet filtreleme
     if "mehter" in text:
         filters["service_type"] = "mehter"
     elif "palyaço" in text or "palyaco" in text:
@@ -136,7 +140,6 @@ def whatsapp_webhook():
         elif "tüm gün" in text or "tum gun" in text:
             filters["detail"] = "tum-gun"
 
-    # Paket önerme
     if (
         filters.get("city") and
         filters.get("district") and
