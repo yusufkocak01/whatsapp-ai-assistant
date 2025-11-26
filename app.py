@@ -1,45 +1,23 @@
-# app.py
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import os
 import requests
+import json
 
 app = Flask(__name__)
 
-# Gemini API Key (Railway Environment Variable üzerinden)
+# Gemini API Key - Railway'de Environment Variable olarak tanımla
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-1.5-t"  # Örnek model, ihtiyacınıza göre değiştirin
-GEMINI_URL = f"https://api.generativeai.google/v1beta2/models/{GEMINI_MODEL}:generateMessage"
+GEMINI_ENDPOINT = "https://api.generativeai.google/v1beta2/models/text-bison-001:generateMessage"
 
 # Tüm linkler
 with open("links.txt", "r", encoding="utf-8") as f:
     ALL_URLS = [line.strip() for line in f if line.strip()]
 
 # Desteklenen şehirler
-CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
+CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", 
+          "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-# Hafızada session (demo)
 sessions = {}
-
-def gemini_chat(messages):
-    """
-    Gemini API ile chat mesajı gönderir ve cevabı döner
-    """
-    headers = {
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messages": [{"author": "user", "content": {"text": m["content"]}} for m in messages if m["role"] == "user"],
-        "temperature": 0.6
-    }
-    try:
-        response = requests.post(GEMINI_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        # Gemini genellikle "candidates" listesinde text döner
-        return data["candidates"][0]["content"][0]["text"]
-    except Exception as e:
-        return f"Hata: {str(e)}"
 
 def find_matches(filters):
     matches = []
@@ -50,14 +28,17 @@ def find_matches(filters):
 
     for url in ALL_URLS:
         u = url.lower()
+
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
+
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
             if district not in parts[1].lower():
                 continue
+
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -68,6 +49,7 @@ def find_matches(filters):
             continue
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
+
         if service == "mehter" and detail:
             if f"-{detail}." not in u:
                 continue
@@ -76,8 +58,30 @@ def find_matches(filters):
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
                 continue
+
         matches.append(url)
+
     return matches[:3]
+
+def gemini_chat(messages):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GEMINI_API_KEY}"
+    }
+    prompt_text = "\n".join([m["content"] for m in messages])
+    data = {
+        "prompt": {
+            "text": prompt_text
+        },
+        "temperature": 0.6,
+        "candidate_count": 1
+    }
+    resp = requests.post(GEMINI_ENDPOINT, headers=headers, json=data)
+    if resp.status_code == 200:
+        r = resp.json()
+        return r.get("candidates", [{}])[0].get("content", "")
+    else:
+        return f"Hata: {resp.status_code} {resp.text}"
 
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
@@ -107,6 +111,7 @@ def whatsapp_webhook():
     session = sessions[from_number]
     session["messages"].append({"role": "user", "content": body})
 
+    # Gemini ile yanıt üret
     ai_reply = gemini_chat(session["messages"])
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
