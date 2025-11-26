@@ -1,19 +1,24 @@
 from flask import Flask, request
 import os
-import re
 from openai import OpenAI
 
 app = Flask(__name__)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Load all URLs
+# OpenAI Client (sk-proj-… anahtarıyla uyumlu)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY ortam değişkeni tanımlı değil!")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Link veri tabanı
 with open("links.txt", "r", encoding="utf-8") as f:
     ALL_URLS = [line.strip() for line in f if line.strip()]
 
-# Supported cities
+# Desteklenen şehirler
 CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
 
-# In-memory sessions (for demo)
+# Oturumlar (demo için in-memory)
 sessions = {}
 
 def find_matches(filters):
@@ -25,17 +30,14 @@ def find_matches(filters):
 
     for url in ALL_URLS:
         u = url.lower()
-
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
-
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
             if district not in parts[1].lower():
                 continue
-
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -46,18 +48,14 @@ def find_matches(filters):
             continue
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
-
-        if service == "mehter" and detail:
-            if f"-{detail}." not in u:
-                continue
+        if service == "mehter" and detail and f"-{detail}." not in u:
+            continue
         if service == "palyaco":
             if detail == "2-saat" and "2-saat" not in u:
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
                 continue
-
         matches.append(url)
-
     return matches[:3]
 
 @app.route("/webhook", methods=["POST"])
@@ -65,9 +63,10 @@ def whatsapp_webhook():
     from_number = request.values.get("From")
     body = request.values.get("Body", "").strip()
 
-    if not from_number:
+    if not from_number or not body:
         return "OK", 200
 
+    # Yeni oturum oluştur
     if from_number not in sessions:
         sessions[from_number] = {
             "messages": [
@@ -88,6 +87,7 @@ def whatsapp_webhook():
     session = sessions[from_number]
     session["messages"].append({"role": "user", "content": body})
 
+    # OpenAI ile yanıt oluştur
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -97,12 +97,13 @@ def whatsapp_webhook():
         )
         ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
-        ai_reply = f"Hata: {str(e)}"  # Geçici olarak hatayı göster
+        ai_reply = f"Hata: {str(e)}"
 
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
-    text = body.lower()
+    # Filtreleri güncelle
     filters = session["filters"]
+    text = body.lower()
 
     for city in CITIES:
         if city.lower() in text:
@@ -136,6 +137,7 @@ def whatsapp_webhook():
         elif "tüm gün" in text or "tum gun" in text:
             filters["detail"] = "tum-gun"
 
+    # Link öner
     if (
         filters.get("city") and
         filters.get("district") and
