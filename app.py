@@ -97,10 +97,11 @@ def whatsapp_webhook():
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=session["messages"],
-            temperature=0.6,
-            max_tokens=250
+    model="gpt-3.5-turbo",  # Garanti altındadır
+    messages=session["messages"],
+    temperature=0.6,
+    max_tokens=250
+)
         )
         ai_reply = response.choices[0].message.content.strip()
     except Exception as e:
@@ -163,3 +164,4 @@ def whatsapp_webhook():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
