@@ -1,12 +1,14 @@
 # app.py
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import os
-from openai import OpenAI
+import requests
 
 app = Flask(__name__)
 
-# OpenAI client, Railway'deki Environment Variable üzerinden alacak
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Gemini API Key (Railway Environment Variable üzerinden)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-1.5-t"  # Örnek model, ihtiyacınıza göre değiştirin
+GEMINI_URL = f"https://api.generativeai.google/v1beta2/models/{GEMINI_MODEL}:generateMessage"
 
 # Tüm linkler
 with open("links.txt", "r", encoding="utf-8") as f:
@@ -18,6 +20,27 @@ CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay", "Gaziantep", "
 # Hafızada session (demo)
 sessions = {}
 
+def gemini_chat(messages):
+    """
+    Gemini API ile chat mesajı gönderir ve cevabı döner
+    """
+    headers = {
+        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messages": [{"author": "user", "content": {"text": m["content"]}} for m in messages if m["role"] == "user"],
+        "temperature": 0.6
+    }
+    try:
+        response = requests.post(GEMINI_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        # Gemini genellikle "candidates" listesinde text döner
+        return data["candidates"][0]["content"][0]["text"]
+    except Exception as e:
+        return f"Hata: {str(e)}"
+
 def find_matches(filters):
     matches = []
     city = filters.get("city", "").lower() if filters.get("city") else ""
@@ -27,17 +50,14 @@ def find_matches(filters):
 
     for url in ALL_URLS:
         u = url.lower()
-
         if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
             continue
-
         if district:
             parts = url.replace("https://israorganizasyon.com/", "").split("-")
             if len(parts) < 2:
                 continue
             if district not in parts[1].lower():
                 continue
-
         if service == "mehter" and "mehter" not in u:
             continue
         if service == "palyaco" and "palyaco" not in u:
@@ -48,7 +68,6 @@ def find_matches(filters):
             continue
         if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
             continue
-
         if service == "mehter" and detail:
             if f"-{detail}." not in u:
                 continue
@@ -57,9 +76,7 @@ def find_matches(filters):
                 continue
             if detail == "tum-gun" and "tum-gun" not in u:
                 continue
-
         matches.append(url)
-
     return matches[:3]
 
 @app.route("/webhook", methods=["POST"])
@@ -90,17 +107,7 @@ def whatsapp_webhook():
     session = sessions[from_number]
     session["messages"].append({"role": "user", "content": body})
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=session["messages"],
-            temperature=0.6,
-            max_tokens=250
-        )
-        ai_reply = response.choices[0].message.content.strip()
-    except Exception as e:
-        ai_reply = f"Hata: {str(e)}"
-
+    ai_reply = gemini_chat(session["messages"])
     session["messages"].append({"role": "assistant", "content": ai_reply})
 
     text = body.lower()
