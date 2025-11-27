@@ -10,7 +10,7 @@ import re
 app = Flask(__name__)
 
 # 🔁 Kendi GitHub raw linkini buraya yaz!
-GITHUB_CSV_URL = "https://github.com/yusufkocak01/whatsapp-ai-assistant/blob/main/prompt.csv"
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/prompt.csv"
 
 def load_rules():
     try:
@@ -20,7 +20,6 @@ def load_rules():
         reader = csv.DictReader(io.StringIO(content))
         rules = []
         for row in reader:
-            # keyword ve rules zorunlu
             if row.get("keyword") and row.get("rules"):
                 rules.append({
                     "keyword": row["keyword"].strip(),
@@ -41,34 +40,21 @@ def whatsapp_webhook():
     resp = MessagingResponse()
     msg = resp.message()
 
+    # Boş mesaj gelirse cevap verme
     if not incoming_msg:
-        fallback = (
-            "Merhaba! 👋 Yusuf’un Dijital Asistanıyım.\n\n"
-            "Lütfen ilgilendiğiniz hizmeti seçin:\n"
-            "1️⃣ Organizasyon\n"
-            "2️⃣ Davet Evi\n"
-            "3️⃣ Stres Evi\n"
-            "4️⃣ Proje\n"
-            "5️⃣ Seslendirme\n"
-            "6️⃣ Metin\n"
-            "7️⃣ Mentorluk"
-        )
-        msg.body(fallback)
         return str(resp)
 
     rules_list = load_rules()
     if rules_list is None:
-        msg.body("Veri geçici olarak yüklenemiyor. Lütfen daha sonra tekrar deneyin.")
+        # Opsiyonel: hata durumunda bile sessiz kal veya kısa mesaj döndür
         return str(resp)
 
     normalized_input = normalize_text(incoming_msg)
 
-    # Önce tam eşleşme ara, sonra içerme
+    # Önce TAM eşleşme
     for rule in rules_list:
         kw = normalize_text(rule["keyword"])
-        if not kw:
-            continue
-        if kw == normalized_input:  # Tam eşleşme öncelikli
+        if kw == normalized_input:
             response_text = rule["rules"]
             link = rule["link"]
             if link and link.lower() not in ["", "none", "null"]:
@@ -78,7 +64,7 @@ def whatsapp_webhook():
             msg.body(response_text)
             return str(resp)
 
-    # Tam eşleşme yoksa, içerme kontrolü
+    # Sonra İÇERME eşleşmesi
     for rule in rules_list:
         kw = normalize_text(rule["keyword"])
         if kw and kw in normalized_input:
@@ -91,26 +77,15 @@ def whatsapp_webhook():
             msg.body(response_text)
             return str(resp)
 
-    # Hiçbir eşleşme yoksa menü
-    fallback = (
-        "Merhaba! 👋 Yusuf’un Dijital Asistanıyım.\n\n"
-        "Lütfen ilgilendiğiniz hizmeti seçin:\n"
-        "1️⃣ Organizasyon\n"
-        "2️⃣ Davet Evi\n"
-        "3️⃣ Stres Evi\n"
-        "4️⃣ Proje\n"
-        "5️⃣ Seslendirme\n"
-        "6️⃣ Metin\n"
-        "7️⃣ Mentorluk"
-    )
-    msg.body(fallback)
+    # ❌ Hiçbir eşleşme yok → **Cevap verme**
+    # (İstersen aşağıdaki yorumu kaldırarak "Anlamadım" mesajı eklenebilir)
+    # msg.body("Mesajınızı anlayamadım. Lütfen geçerli bir anahtar kelime kullanın.")
     return str(resp)
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return "✅ CSV tabanlı WhatsApp Asistan çalışıyor!"
+    return "✅ Sadece CSV'ye sadık WhatsApp Asistan çalışıyor!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
-
