@@ -1,158 +1,95 @@
-from flask import Flask, request
+# app.py
 import os
-import requests
-from dotenv import load_dotenv
-
-# Lokal test için .env dosyasını yükle
-load_dotenv()
+import json
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+import gspread
+from google.oauth2.service_account import Credentials
+import re
 
 app = Flask(__name__)
 
-# Gemini API Key
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_KEY:
-    print("Uyarı: GEMINI_API_KEY bulunamadı!")
+# Google Sheets erişim bilgisi (Railway'de .env'den alınacak)
+GOOGLE_SHEETS_ID = "1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc"
+SERVICE_ACCOUNT_INFO = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+if SERVICE_ACCOUNT_INFO:
+    creds = Credentials.from_service_account_info(
+        json.loads(SERVICE_ACCOUNT_INFO),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    gc = gspread.authorize(creds)
+else:
+    gc = None
 
-# Tüm linkler
-with open("links.txt", "r", encoding="utf-8") as f:
-    ALL_URLS = [line.strip() for line in f if line.strip()]
+def normalize_text(text):
+    """Küçük harfe çevir, fazla boşlukları temizle"""
+    return re.sub(r'\s+', ' ', text.strip().lower())
 
-CITIES = ["Adana", "Niğde", "Mersin", "Kahramanmaraş", "Hatay",
-          "Gaziantep", "Osmaniye", "Kilis", "Aksaray"]
+def find_response(user_message):
+    if not gc:
+        return "Bot yapılandırılmamış."
+    
+    try:
+        sheet = gc.open_by_key(GOOGLE_SHEETS_ID)
+        worksheets = sheet.worksheets()
+    except Exception as e:
+        return f"Sayfa açılamadı: {str(e)}"
 
-sessions = {}
+    normalized_input = normalize_text(user_message)
 
-def ask_gemini(prompt):
-    url = "https://generativelanguage.googleapis.com/v1beta2/models/text-bison-001:generateMessage"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "prompt": {"text": prompt},
-        "temperature": 0.6,
-        "candidate_count": 1
-    }
-    params = {"key": GEMINI_KEY}
-    resp = requests.post(url, headers=headers, json=payload, params=params)
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["text"]
+    for ws in worksheets:
+        try:
+            # İlk satırda başlıklar olmalı: keyword, rules, link
+            records = ws.get_all_records()
+        except:
+            continue  # Başlık eksikse atla
 
-def find_matches(filters):
-    matches = []
-    city = filters.get("city", "").lower() if filters.get("city") else ""
-    district = filters.get("district", "").lower() if filters.get("district") else ""
-    service = filters.get("service_type")
-    detail = filters.get("detail")
-
-    for url in ALL_URLS:
-        u = url.lower()
-
-        if city and not u.startswith(f"https://israorganizasyon.com/{city.lower()}"):
-            continue
-
-        if district:
-            parts = url.replace("https://israorganizasyon.com/", "").split("-")
-            if len(parts) < 2:
+        for row in records:
+            keyword = normalize_text(str(row.get("keyword", "")).strip())
+            if not keyword:
                 continue
-            if district not in parts[1].lower():
-                continue
-
-        if service == "mehter" and "mehter" not in u:
-            continue
-        if service == "palyaco" and "palyaco" not in u:
-            continue
-        if service in ["sunnet_dugunu", "dini_dugun"] and not ("sunnet" in u or "dugunu" in u):
-            continue
-        if service == "bando" and "bando" not in u:
-            continue
-        if service == "karagoz" and ("karagoz" not in u and "golge" not in u):
-            continue
-
-        if service == "mehter" and detail:
-            if f"-{detail}." not in u:
-                continue
-        if service == "palyaco":
-            if detail == "2-saat" and "2-saat" not in u:
-                continue
-            if detail == "tum-gun" and "tum-gun" not in u:
-                continue
-
-        matches.append(url)
-
-    return matches[:3]
+            # Tam eşleşme veya içeriyorsa
+            if keyword == normalized_input or keyword in normalized_input:
+                rules = str(row.get("rules", "")).strip()
+                link = str(row.get("link", "")).strip()
+                if link and link.lower() not in ["", "none", "null"]:
+                    if not link.startswith("http"):
+                        link = "https://" + link
+                    rules += "\n\n" + link
+                return rules
+    return None
 
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
-    from_number = request.values.get("From")
-    body = request.values.get("Body", "").strip()
+    incoming_msg = request.values.get("Body", "").strip()
+    resp = MessagingResponse()
+    msg = resp.message()
 
-    if not from_number:
-        return "OK", 200
+    if not incoming_msg:
+        msg.body("Merhaba! Size nasıl yardımcı olabilirim?")
+    else:
+        response = find_response(incoming_msg)
+        if response:
+            msg.body(response)
+        else:
+            # Varsayılan menü (eşleşme yoksa)
+            msg.body(
+                "Merhaba! 👋 Yusuf’un Dijital Asistanıyım.\n\n"
+                "Lütfen ilgilendiğiniz hizmeti seçin:\n"
+                "1️⃣ Organizasyon\n"
+                "2️⃣ Davet Evi\n"
+                "3️⃣ Stres Evi\n"
+                "4️⃣ Proje\n"
+                "5️⃣ Seslendirme\n"
+                "6️⃣ Metin\n"
+                "7️⃣ Mentorluk"
+            )
+    return str(resp)
 
-    if from_number not in sessions:
-        sessions[from_number] = {
-            "messages": [{"role": "user", "content": ""}],
-            "filters": {}
-        }
-
-    session = sessions[from_number]
-    session["messages"].append({"role": "user", "content": body})
-
-    try:
-        ai_reply = ask_gemini(body)
-    except Exception as e:
-        ai_reply = f"Hata: {str(e)}"
-
-    session["messages"].append({"role": "assistant", "content": ai_reply})
-
-    # Filtreleme
-    text = body.lower()
-    filters = session["filters"]
-
-    for city in CITIES:
-        if city.lower() in text:
-            filters["city"] = city
-
-    known_districts = {url.split("/")[3].split("-")[1] for url in ALL_URLS if len(url.split("/")) > 3}
-    for d in known_districts:
-        if d.lower() in text:
-            filters["district"] = d
-
-    if "mehter" in text:
-        filters["service_type"] = "mehter"
-    elif "palyaço" in text or "palyaco" in text:
-        filters["service_type"] = "palyaco"
-    elif "dini düğün" in text or "nikah" in text or "sunnet" in text or "düğün" in text:
-        filters["service_type"] = "sunnet_dugunu"
-    elif "bando" in text:
-        filters["service_type"] = "bando"
-    elif "karagöz" in text or "gölge" in text or "hacivat" in text:
-        filters["service_type"] = "karagoz"
-
-    if filters.get("service_type") == "mehter":
-        for size in ["8", "12", "18", "24", "30", "32"]:
-            if size in text:
-                filters["detail"] = size
-                break
-
-    if filters.get("service_type") == "palyaco":
-        if "2 saat" in text or "2-saat" in text:
-            filters["detail"] = "2-saat"
-        elif "tüm gün" in text or "tum gun" in text:
-            filters["detail"] = "tum-gun"
-
-    if (
-        filters.get("city") and
-        filters.get("district") and
-        filters.get("service_type") and
-        (filters["service_type"] not in ["mehter", "palyaco"] or filters.get("detail"))
-    ):
-        matches = find_matches(filters)
-        if matches and "http" not in ai_reply:
-            ai_reply += "\n\nİşte size uygun paketler:\n" + "\n".join(matches)
-            ai_reply += "\n\nİnceleyin, detay isterseniz yardımcı olabilirim! 😊"
-
-    return ai_reply, 200, {"Content-Type": "text/plain; charset=utf-8"}
+# Railway için sağlık kontrolü
+@app.route("/", methods=["GET"])
+def health_check():
+    return "✅ Bot çalışıyor!"
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
