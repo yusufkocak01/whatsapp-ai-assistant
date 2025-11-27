@@ -9,7 +9,7 @@ import re
 
 app = Flask(__name__)
 
-# 🔁 Kendi GitHub raw linkini buraya yaz!
+# 🔁 GitHub raw linkini DÜZELTTİM: sondaki boşluk KALDIRILDI!
 GITHUB_CSV_URL = "https://raw.githubusercontent.com/yusufkocak01/whatsapp-ai-assistant/main/prompt.csv"
 
 def load_rules():
@@ -20,7 +20,7 @@ def load_rules():
         reader = csv.DictReader(io.StringIO(content))
         rules = []
         for row in reader:
-            if row.get("keyword") and row.get("rules"):
+            if row.get("keyword") and row.get("rules") is not None:
                 rules.append({
                     "keyword": row["keyword"].strip(),
                     "rules": row["rules"].strip(),
@@ -34,59 +34,75 @@ def load_rules():
 def normalize_text(text):
     return re.sub(r'\s+', ' ', text.strip().lower())
 
+def format_link(link):
+    """Link'i güvenli şekilde formatlar."""
+    if not link or link.lower() in ["", "none", "null"]:
+        return ""
+    link = link.strip()
+    if not link.startswith(("http://", "https://")):
+        link = "https://" + link
+    return link
+
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     incoming_msg = request.values.get("Body", "").strip()
     resp = MessagingResponse()
     msg = resp.message()
 
-    # Boş mesaj gelirse cevap verme
     if not incoming_msg:
         return str(resp)
 
     rules_list = load_rules()
     if rules_list is None:
-        # Opsiyonel: hata durumunda bile sessiz kal veya kısa mesaj döndür
         return str(resp)
 
     normalized_input = normalize_text(incoming_msg)
+    matched_responses = []
+    used_keywords = set()  # Tekrarı önlemek için
 
-    # Önce TAM eşleşme
+    # 🔍 1. TAM EŞLEŞME kontrolü
     for rule in rules_list:
         kw = normalize_text(rule["keyword"])
         if kw == normalized_input:
+            if kw in used_keywords:
+                continue
+            used_keywords.add(kw)
             response_text = rule["rules"]
-            link = rule["link"]
-            if link and link.lower() not in ["", "none", "null"]:
-                if not link.startswith(("http://", "https://")):
-                    link = "https://" + link
+            link = format_link(rule["link"])
+            if link:
                 response_text += "\n\n" + link
-            msg.body(response_text)
-            return str(resp)
+            matched_responses.append(response_text)
 
-    # Sonra İÇERME eşleşmesi
+    # 🔍 2. İÇERME EŞLEŞMESİ (ama tam eşleşenler hariç)
     for rule in rules_list:
         kw = normalize_text(rule["keyword"])
-        if kw and kw in normalized_input:
+        if not kw:
+            continue
+        if kw in used_keywords:
+            continue  # Zaten tam eşleşmeyle gönderildi
+        if kw in normalized_input:
+            if kw in used_keywords:
+                continue
+            used_keywords.add(kw)
             response_text = rule["rules"]
-            link = rule["link"]
-            if link and link.lower() not in ["", "none", "null"]:
-                if not link.startswith(("http://", "https://")):
-                    link = "https://" + link
+            link = format_link(rule["link"])
+            if link:
                 response_text += "\n\n" + link
-            msg.body(response_text)
-            return str(resp)
+            matched_responses.append(response_text)
 
-    # ❌ Hiçbir eşleşme yok → **Cevap verme**
-    # (İstersen aşağıdaki yorumu kaldırarak "Anlamadım" mesajı eklenebilir)
-    # msg.body("Mesajınızı anlayamadım. Lütfen geçerli bir anahtar kelime kullanın.")
+    # ✉️ Eşleşen cevaplar varsa, hepsini birleştirip gönder
+    if matched_responses:
+        full_message = "\n\n".join(matched_responses)
+        msg.body(full_message)
+
+    # ❌ Eşleşme yoksa: sessiz kal (isteğe bağlı uyarı eklenebilir)
+
     return str(resp)
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return "✅ Sadece CSV'ye sadık WhatsApp Asistan çalışıyor!"
+    return "✅ Çoklu keyword destekli WhatsApp Asistan çalışıyor!"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
-
