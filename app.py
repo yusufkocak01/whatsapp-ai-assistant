@@ -1,73 +1,39 @@
 # app.py
 import os
-import json
-import re
+import csv
+import io
+import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-import gspread
-from google.oauth2.service_account import Credentials
+import re
 
 app = Flask(__name__)
 
-# Google Sheets ID (sizin sheet)
-GOOGLE_SHEETS_ID = "1WIrtBeUnrCSbwOcoaEFdOCksarcPva15XHN-eMhDrZc"
+# 🔁 Kendi GitHub raw linkini buraya yaz!
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/prompt.csv"
 
-# Google Sheets erişimi
-SERVICE_ACCOUNT_INFO = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-if SERVICE_ACCOUNT_INFO:
+def load_rules():
     try:
-        creds = Credentials.from_service_account_info(
-            json.loads(SERVICE_ACCOUNT_INFO),
-            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        )
-        gc = gspread.authorize(creds)
+        response = requests.get(GITHUB_CSV_URL, timeout=10)
+        response.raise_for_status()
+        content = response.content.decode('utf-8')
+        reader = csv.DictReader(io.StringIO(content))
+        rules = []
+        for row in reader:
+            # keyword ve rules zorunlu
+            if row.get("keyword") and row.get("rules"):
+                rules.append({
+                    "keyword": row["keyword"].strip(),
+                    "rules": row["rules"].strip(),
+                    "link": row.get("link", "").strip()
+                })
+        return rules
     except Exception as e:
-        print("❗ Google Auth hatası:", e)
-        gc = None
-else:
-    gc = None
+        print("❗ CSV yüklenemedi:", e)
+        return None
 
 def normalize_text(text):
-    """Küçük harfe çevir, fazla boşluğu tek boşluğa indir"""
     return re.sub(r'\s+', ' ', text.strip().lower())
-
-def find_response(user_message):
-    if not gc:
-        return "Asistan yapılandırılmamış. Lütfen yöneticiyle iletişime geçin."
-
-    try:
-        sheet = gc.open_by_key(GOOGLE_SHEETS_ID)
-        worksheets = sheet.worksheets()
-    except Exception as e:
-        print("❗ Sheet açma hatası:", e)
-        return "Veri kaynağına erişilemiyor."
-
-    normalized_input = normalize_text(user_message)
-
-    for ws in worksheets:
-        try:
-            records = ws.get_all_records()
-        except:
-            continue  # Başlık eksikse bu sekme atlanır
-
-        for row in records:
-            try:
-                keyword = normalize_text(str(row.get("keyword", "")).strip())
-                if not keyword:
-                    continue
-                # Tam eşleşme ÖNCESİ: önce "tam eşleşme" kontrol et, sonra "içerme"
-                if keyword == normalized_input or keyword in normalized_input:
-                    rules = str(row.get("rules", "")).strip()
-                    link = str(row.get("link", "")).strip()
-                    if link and link.lower() not in ["", "none", "null"]:
-                        if not link.startswith(("http://", "https://")):
-                            link = "https://" + link
-                        rules += "\n\n" + link
-                    return rules
-            except Exception as row_error:
-                print(f"❗ Satır hatası ({ws.title}):", row_error)
-                continue
-    return None
 
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
@@ -88,30 +54,62 @@ def whatsapp_webhook():
             "7️⃣ Mentorluk"
         )
         msg.body(fallback)
-    else:
-        response = find_response(incoming_msg)
-        if response:
-            msg.body(response)
-        else:
-            # Eşleşme yoksa menü göster
-            fallback = (
-                "Merhaba! 👋 Yusuf’un Dijital Asistanıyım.\n\n"
-                "Lütfen ilgilendiğiniz hizmeti seçin:\n"
-                "1️⃣ Organizasyon\n"
-                "2️⃣ Davet Evi\n"
-                "3️⃣ Stres Evi\n"
-                "4️⃣ Proje\n"
-                "5️⃣ Seslendirme\n"
-                "6️⃣ Metin\n"
-                "7️⃣ Mentorluk"
-            )
-            msg.body(fallback)
+        return str(resp)
+
+    rules_list = load_rules()
+    if rules_list is None:
+        msg.body("Veri geçici olarak yüklenemiyor. Lütfen daha sonra tekrar deneyin.")
+        return str(resp)
+
+    normalized_input = normalize_text(incoming_msg)
+
+    # Önce tam eşleşme ara, sonra içerme
+    for rule in rules_list:
+        kw = normalize_text(rule["keyword"])
+        if not kw:
+            continue
+        if kw == normalized_input:  # Tam eşleşme öncelikli
+            response_text = rule["rules"]
+            link = rule["link"]
+            if link and link.lower() not in ["", "none", "null"]:
+                if not link.startswith(("http://", "https://")):
+                    link = "https://" + link
+                response_text += "\n\n" + link
+            msg.body(response_text)
+            return str(resp)
+
+    # Tam eşleşme yoksa, içerme kontrolü
+    for rule in rules_list:
+        kw = normalize_text(rule["keyword"])
+        if kw and kw in normalized_input:
+            response_text = rule["rules"]
+            link = rule["link"]
+            if link and link.lower() not in ["", "none", "null"]:
+                if not link.startswith(("http://", "https://")):
+                    link = "https://" + link
+                response_text += "\n\n" + link
+            msg.body(response_text)
+            return str(resp)
+
+    # Hiçbir eşleşme yoksa menü
+    fallback = (
+        "Merhaba! 👋 Yusuf’un Dijital Asistanıyım.\n\n"
+        "Lütfen ilgilendiğiniz hizmeti seçin:\n"
+        "1️⃣ Organizasyon\n"
+        "2️⃣ Davet Evi\n"
+        "3️⃣ Stres Evi\n"
+        "4️⃣ Proje\n"
+        "5️⃣ Seslendirme\n"
+        "6️⃣ Metin\n"
+        "7️⃣ Mentorluk"
+    )
+    msg.body(fallback)
     return str(resp)
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return "✅ WhatsApp Asistan çalışıyor! Webhook: /webhook"
+    return "✅ CSV tabanlı WhatsApp Asistan çalışıyor!"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))  # Railway PORT'u kullan, yoksa 8080
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
