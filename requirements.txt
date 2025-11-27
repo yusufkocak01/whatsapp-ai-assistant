@@ -1,5 +1,4 @@
-flask
-openai
-python-dotenv
-requests
-twilio
+Flask==3.0.3
+twilio==9.3.2
+gspread==6.1.2
+google-auth==2.32.0
