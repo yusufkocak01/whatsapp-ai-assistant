@@ -10,7 +10,7 @@ import re
 app = Flask(__name__)
 
 # 🔁 Kendi GitHub raw linkini buraya yaz!
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/prompt.csv"
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/yusufkocak01/whatsapp-ai-assistant/main/prompt.csv"
 
 def load_rules():
     try:
@@ -89,3 +89,4 @@ def health_check():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port, debug=False)
+
