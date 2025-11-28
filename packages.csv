@@ -1,17 +1,17 @@
 url,il,ilce,kategori
-https://israorganizasyon.com/adana-adana-4-ki̇si̇li̇k-bando-paketi̇.html,Adana,Merkez,bando
+https://israorganizasyon.com/adana-adana-4-ki̇si̇li̇k-bando-paketi̇.html,Adana,Merkez,karagöz
 https://israorganizasyon.com/adana-adana-8-ki̇si̇li̇k-bando-paketi̇.html,Adana,Merkez,bando
-https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-defli̇-i̇lahi̇-grubu-paket-3.html,Adana,Merkez,#ERROR!
-https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-i̇lahi̇-grubu-paket-1.html,Adana,Merkez,"IF(REGEXMATCH(LOWER(A7);""sunnet|sünnet"");""sünnet düğünü"";"
-https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-i̇lahi̇-grubu-paket-2.html,Adana,Merkez,"IF(REGEXMATCH(LOWER(A7);""mehter"");""mehter"";"
-https://israorganizasyon.com/adana-adana-karagoz-ve-haci̇vat-golge-oyunu-paketi̇.html,Adana,Merkez,"IF(REGEXMATCH(LOWER(A7);""bando"");""bando"";"
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-12.html,Adana,Merkez,"IF(REGEXMATCH(LOWER(A7);""karagoz"");""karagöz"";"
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-18.html,Adana,Merkez,"IF(REGEXMATCH(LOWER(A7);""ilahi[\s\-]*grubu"");""ilahi grubu"";"""")"
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-24.html,Adana,Merkez,)
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-30.html,Adana,Merkez,)
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-32.html,Adana,Merkez,)
-https://israorganizasyon.com/adana-adana-mehter-paketi̇-8.html,Adana,Merkez,)
-https://israorganizasyon.com/adana-adana-palyaco-paketi̇-1;5-(2-saat).html,Adana,Merkez,)
+https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-defli̇-i̇lahi̇-grubu-paket-3.html,Adana,Merkez,karagöz
+https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-i̇lahi̇-grubu-paket-1.html,Adana,Merkez,
+https://israorganizasyon.com/adana-adana-di̇ni̇-dugun-i̇lahi̇-grubu-paket-2.html,Adana,Merkez,
+https://israorganizasyon.com/adana-adana-karagoz-ve-haci̇vat-golge-oyunu-paketi̇.html,Adana,Merkez,karagöz
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-12.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-18.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-24.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-30.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-32.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-mehter-paketi̇-8.html,Adana,Merkez,mehter
+https://israorganizasyon.com/adana-adana-palyaco-paketi̇-1;5-(2-saat).html,Adana,Merkez,palyaço
 https://israorganizasyon.com/adana-adana-palyaco-paketi̇-1-(2-saat).html,Adana,Merkez,palyaço
 https://israorganizasyon.com/adana-adana-palyaco-paketi̇-1-(tum-gun).html,Adana,Merkez,palyaço
 https://israorganizasyon.com/adana-adana-palyaco-paketi̇-2-(2-saat).html,Adana,Merkez,palyaço
