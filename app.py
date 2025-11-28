@@ -63,8 +63,7 @@ def normalize_text(text):
     return re.sub(r'\s+', ' ', text.strip().lower())
 
 def normalize_city(text):
-    text = normalize_text(text)
-    return text
+    return normalize_text(text)
 
 def extract_location(text):
     words = normalize_city(text).split()
@@ -95,6 +94,7 @@ def whatsapp_webhook():
 
     normalized_input = normalize_text(incoming_msg)
 
+    # --- Oturum varsa, konum bilgisi bekleniyor ---
     if from_number in user_sessions:
         session = user_sessions[from_number]
         if session["state"] == "waiting_for_location":
@@ -124,9 +124,11 @@ def whatsapp_webhook():
             else:
                 msg.body(f"Üzgünüz, {il.title()} / {ilce.title() if ilce else 'merkez'} bölgesinde şu anda uygun {target_category} paketi bulunmuyor.")
 
+            # Oturumu temizle
             user_sessions.pop(from_number, None)
             return str(resp)
 
+    # --- Oturum yoksa: önce Giriş sekmesinden cevap ver ---
     rules_list = load_rules()
     if rules_list is None:
         return str(resp)
@@ -150,6 +152,7 @@ def whatsapp_webhook():
         msg.body("\n\n".join(matched_responses))
         return str(resp)
 
+    # --- Özel niyetler ---
     intents_map = {
         "palyaço": "palyaço",
         "mehter": "mehter",
@@ -174,6 +177,7 @@ def whatsapp_webhook():
         msg.body(f"📍 {detected_intent} hizmeti için il ve/veya ilçe yazınız (örn: Adana Kozan).")
         return str(resp)
 
+    # --- Son çare: yönlendirme sorusu ---
     msg.body("Hangi hizmetle ilgileniyorsunuz? Palyaço, Sünnet düğünü, Mehter, Bando, Karagöz, İlahi Grubu gibi seçeneklerden birini yazabilirsiniz.")
     return str(resp)
 
