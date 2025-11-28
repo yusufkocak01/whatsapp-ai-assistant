@@ -10,14 +10,12 @@ import unicodedata
 
 app = Flask(__name__)
 
-# GitHub CSV URL'leri
 GITHUB_PROMPT_CSV_URL = "https://raw.githubusercontent.com/yusufkocak01/whatsapp-ai-assistant/main/prompt.csv"
 GITHUB_PACKAGES_CSV_URL = "https://raw.githubusercontent.com/yusufkocak01/whatsapp-ai-assistant/main/packages.csv"
 
-# Oturum takibi (production'da Redis önerilir)
 user_sessions = {}
 
-# --- YARDIMCI FONKSİYONLAR ---
+# --- Yardımcı Fonksiyonlar ---
 def load_rules():
     try:
         response = requests.get(GITHUB_PROMPT_CSV_URL, timeout=10)
@@ -45,12 +43,13 @@ def load_packages():
         reader = csv.DictReader(io.StringIO(content))
         packages = []
         for row in reader:
-            if row.get("url") and row.get("il") and row.get("ilce") and row.get("kategori"):
+            if row.get("url") and row.get("il") and row.get("ilce") and row.get("kategori") and row.get("aciklama"):
                 packages.append({
                     "url": row["url"].strip(),
                     "il": row["il"].strip(),
                     "ilce": row["ilce"].strip(),
-                    "kategori": row["kategori"].strip()
+                    "kategori": row["kategori"].strip(),
+                    "aciklama": row["aciklama"].strip()
                 })
         return packages
     except Exception as e:
@@ -81,7 +80,7 @@ def format_link(link):
         link = "https://" + link
     return link
 
-# --- WHATSAPP WEBHOOK ---
+# --- WhatsApp Webhook ---
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     incoming_msg = request.values.get("Body", "").strip()
@@ -94,14 +93,16 @@ def whatsapp_webhook():
 
     normalized_input = normalize_text(incoming_msg)
 
-    # --- Oturum varsa, konum bilgisi bekleniyor ---
+    # --- Oturum varsa ---
     if from_number in user_sessions:
         session = user_sessions[from_number]
-        if session["state"] == "waiting_for_location":
+
+        # Paket kategorisi seçildiyse, il/ilçe bekleniyor
+        if session.get("state") == "waiting_for_location":
             il, ilce = extract_location(incoming_msg)
             packages = load_packages()
             if not packages:
-                msg.body("Paket bilgileri yüklenemiyor. Lütfen daha sonra tekrar deneyin.")
+                msg.body("Paket bilgileri yüklenemiyor, lütfen daha sonra tekrar deneyin.")
                 return str(resp)
 
             target_category = session["intent"]
@@ -117,71 +118,63 @@ def whatsapp_webhook():
                         matches.append(p)
 
             if matches:
-                response_text = f"✅ {target_category.title()} için şu linklere bakabilirsiniz. Bu paketlerde fiyat bilgisi de mevcut:\n\n"
+                response_text = f"✅ {target_category.title()} için uygun paketler ve kısa açıklamaları:\n\n"
                 for p in matches[:5]:
-                    response_text += f"👉 {p['url']}\n"
+                    response_text += f"👉 {p['aciklama']}\n   {p['url']}\n"
                 msg.body(response_text)
             else:
-                msg.body(f"Üzgünüz, {il.title()} / {ilce.title() if ilce else 'merkez'} bölgesinde şu anda uygun {target_category} paketi bulunmuyor.")
+                msg.body(f"Üzgünüz, {il.title()} / {ilce.title() if ilce else 'merkez'} bölgesinde uygun {target_category} paketi bulunmuyor.")
 
-            # Oturumu temizle
             user_sessions.pop(from_number, None)
             return str(resp)
 
-    # --- Oturum yoksa: önce Giriş sekmesinden cevap ver ---
+        # Oturumda “Neyle ilgili bilgi vereyim?” sorusu varsa
+        elif session.get("state") == "waiting_for_category":
+            detected_intent = None
+            intents_map = {
+                "palyaço": "palyaço",
+                "mehter": "mehter",
+                "dini düğün": "ilahi grubu",
+                "bando": "bando",
+                "karagöz": "karagöz",
+                "sünnet": "sünnet düğünü",
+                "ilahi": "ilahi grubu"
+            }
+            for keyword, intent in intents_map.items():
+                if keyword in normalized_input:
+                    detected_intent = intent
+                    break
+
+            if detected_intent:
+                user_sessions[from_number] = {
+                    "state": "waiting_for_location",
+                    "intent": detected_intent
+                }
+                msg.body(f"📍 {detected_intent} hizmeti için il ve/veya ilçe yazınız (örn: Adana Kozan).")
+                return str(resp)
+            else:
+                msg.body("Maalesef bu hizmeti tanımıyorum. Lütfen Palyaço, Mehter, Bando, Karagöz, Sünnet, İlahi Grubu gibi seçeneklerden birini yazınız.")
+                return str(resp)
+
+    # --- Önce Giriş sekmesine bak ---
     rules_list = load_rules()
-    if rules_list is None:
-        return str(resp)
+    if rules_list:
+        for rule in rules_list:
+            kw = normalize_text(rule["keyword"])
+            if kw and (kw == normalized_input or kw in normalized_input):
+                response_text = rule["rules"]
+                link = format_link(rule.get("link", ""))
+                if link:
+                    response_text += f"\n\n{link}"
+                msg.body(response_text)
+                return str(resp)
 
-    matched_responses = []
-    used_keywords = set()
-
-    for rule in rules_list:
-        kw = normalize_text(rule["keyword"])
-        if kw in used_keywords or not kw:
-            continue
-        if kw == normalized_input or kw in normalized_input:
-            used_keywords.add(kw)
-            response_text = rule["rules"]
-            link = format_link(rule.get("link", ""))
-            if link:
-                response_text += "\n\n" + link
-            matched_responses.append(response_text)
-
-    if matched_responses:
-        msg.body("\n\n".join(matched_responses))
-        return str(resp)
-
-    # --- Özel niyetler ---
-    intents_map = {
-        "palyaço": "palyaço",
-        "mehter": "mehter",
-        "dini düğün": "ilahi grubu",
-        "bando": "bando",
-        "karagöz": "karagöz",
-        "sünnet": "sünnet düğünü",
-        "ilahi": "ilahi grubu"
-    }
-
-    detected_intent = None
-    for keyword, intent in intents_map.items():
-        if keyword in normalized_input:
-            detected_intent = intent
-            break
-
-    if detected_intent:
-        user_sessions[from_number] = {
-            "state": "waiting_for_location",
-            "intent": detected_intent
-        }
-        msg.body(f"📍 {detected_intent} hizmeti için il ve/veya ilçe yazınız (örn: Adana Kozan).")
-        return str(resp)
-
-    # --- Son çare: yönlendirme sorusu ---
-    msg.body("Hangi hizmetle ilgileniyorsunuz? Palyaço, Sünnet düğünü, Mehter, Bando, Karagöz, İlahi Grubu gibi seçeneklerden birini yazabilirsiniz.")
+    # --- Giriş yoksa: paket seçimi ---
+    user_sessions[from_number] = {"state": "waiting_for_category"}
+    msg.body("Neyle ilgili bilgi vereyim? (örn: Palyaço, Sünnet düğünü, Mehter, Bando, Karagöz, İlahi Grubu)")
     return str(resp)
 
-# --- SAĞLIK KONTROL ---
+# --- Sağlık kontrol ---
 @app.route("/", methods=["GET"])
 def health_check():
     return "✅ Dinamik WhatsApp Asistan çalışıyor: prompt + packages + multi-keyword + stateful flow"
